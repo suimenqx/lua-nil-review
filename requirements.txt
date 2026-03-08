@@ -1,0 +1,4 @@
+luaparser==4.0.0
+antlr4-python3-runtime==4.13.2
+multimethod==2.0.2
+
