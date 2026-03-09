@@ -6,7 +6,6 @@ from pathlib import Path
 from typing import Any
 
 try:
-    from luaparser import ast
     import luaparser.astnodes as N
 except ImportError as exc:  # pragma: no cover
     raise SystemExit(
@@ -15,6 +14,7 @@ except ImportError as exc:  # pragma: no cover
 
 from .common import BUILTIN_NON_NIL_CALLS, RULE_ID, RULE_VERSION, SNIPPET_MAX_LINES, SNIPPET_RADIUS, normalize_whitespace, sha256_hex
 from .config import ReviewConfig
+from .parsed_lua import ParsedLuaFile, SourceIndex, parse_lua_file
 
 NilState = str
 MISSING = object()
@@ -87,53 +87,6 @@ class FileAnalysis:
         }
 
 
-class SourceIndex:
-    def __init__(self, relative_path: str, text: str) -> None:
-        self.relative_path = relative_path
-        self.text = text
-        self.lines = text.splitlines()
-
-    def line_text(self, line_number: int) -> str:
-        if not self.lines:
-            return ""
-        index = max(1, min(line_number, len(self.lines))) - 1
-        return self.lines[index]
-
-    def node_text(self, node: Any) -> str:
-        start = self.node_start(node)
-        stop = self.node_stop(node)
-        if start is None or stop is None:
-            return ""
-        return self.text[start : stop + 1]
-
-    def node_start(self, node: Any) -> int | None:
-        token = getattr(node, "first_token", None)
-        return token.start if token else None
-
-    def node_stop(self, node: Any) -> int | None:
-        token = getattr(node, "last_token", None)
-        return token.stop if token else None
-
-    def line_column_for_node(self, node: Any) -> tuple[int, int]:
-        token = getattr(node, "first_token", None)
-        if token:
-            return int(token.line), int(token.column) + 1
-        return 1, 1
-
-    def snippet(self, center_line: int, *, radius: int = SNIPPET_RADIUS, label: str | None = None) -> str:
-        if not self.lines:
-            return ""
-        start_line = max(1, center_line - radius)
-        end_line = min(len(self.lines), center_line + radius)
-        if end_line - start_line + 1 > SNIPPET_MAX_LINES:
-            end_line = start_line + SNIPPET_MAX_LINES - 1
-        header = f"# {self.relative_path}:{start_line}-{end_line}"
-        if label:
-            header = f"{header} {label}"
-        body = [f"{line_no:>6} | {self.line_text(line_no)}" for line_no in range(start_line, end_line + 1)]
-        return "\n".join([header, *body]) + "\n"
-
-
 def join_states(left: NilState, right: NilState) -> NilState:
     if left == right:
         return left
@@ -161,31 +114,17 @@ def merge_envs(*envs: dict[str, ValueInfo]) -> dict[str, ValueInfo]:
 
 
 class LuaNilAnalyzer:
-    def __init__(self, relative_path: str, text: str, config: ReviewConfig) -> None:
-        self.relative_path = relative_path
-        self.text = text
+    def __init__(self, parsed_file: ParsedLuaFile, config: ReviewConfig) -> None:
+        self.relative_path = parsed_file.relative_path
+        self.text = parsed_file.text
         self.config = config
-        self.source = SourceIndex(relative_path, text)
+        self.parsed_file = parsed_file
+        self.source = parsed_file.source
         self.findings: list[dict[str, Any]] = []
         self.functions_analyzed = 0
 
     def analyze(self, *, file_id: str, content_hash: str, analysis_fingerprint: str, snippets_dir: Path) -> FileAnalysis:
-        try:
-            root = ast.parse(self.text)
-        except Exception as exc:
-            return FileAnalysis(
-                relative_path=self.relative_path,
-                file_id=file_id,
-                content_hash=content_hash,
-                analysis_fingerprint=analysis_fingerprint,
-                parse_status="error",
-                parse_error=str(exc),
-                findings=[],
-                suppressed_findings=0,
-                functions_analyzed=0,
-            )
-
-        self._analyze_chunk(root, snippets_dir)
+        self._analyze_chunk(self.parsed_file.root, snippets_dir)
         suppressed = sum(1 for finding in self.findings if finding["suppressed"])
         return FileAnalysis(
             relative_path=self.relative_path,
@@ -471,7 +410,15 @@ class LuaNilAnalyzer:
             relative = f"snippets/{finding_id}--{index:02d}-{event.kind}.txt"
             target = snippets_dir / f"{finding_id}--{index:02d}-{event.kind}.txt"
             target.parent.mkdir(parents=True, exist_ok=True)
-            target.write_text(self.source.snippet(event.line, label=f"{finding_id} {event.kind}"), encoding="utf-8")
+            target.write_text(
+                self.source.snippet(
+                    event.line,
+                    radius=SNIPPET_RADIUS,
+                    max_lines=SNIPPET_MAX_LINES,
+                    label=f"{finding_id} {event.kind}",
+                ),
+                encoding="utf-8",
+            )
             event.snippet_path = relative
             snippets.append(relative)
         return snippets
@@ -557,8 +504,32 @@ class LuaNilAnalyzer:
         return f"anonymous@{line}"
 
 
-def analyze_lua_file(relative_path: str, text: str, config: ReviewConfig, *, file_id: str, content_hash: str, analysis_fingerprint: str, snippets_dir: Path) -> FileAnalysis:
-    return LuaNilAnalyzer(relative_path, text, config).analyze(
+def analyze_lua_file(
+    relative_path: str,
+    text: str,
+    config: ReviewConfig,
+    *,
+    file_id: str,
+    content_hash: str,
+    analysis_fingerprint: str,
+    snippets_dir: Path,
+    parsed_file: ParsedLuaFile | None = None,
+) -> FileAnalysis:
+    try:
+        parsed = parsed_file or parse_lua_file(relative_path, text)
+    except Exception as exc:
+        return FileAnalysis(
+            relative_path=relative_path,
+            file_id=file_id,
+            content_hash=content_hash,
+            analysis_fingerprint=analysis_fingerprint,
+            parse_status="error",
+            parse_error=str(exc),
+            findings=[],
+            suppressed_findings=0,
+            functions_analyzed=0,
+        )
+    return LuaNilAnalyzer(parsed, config).analyze(
         file_id=file_id,
         content_hash=content_hash,
         analysis_fingerprint=analysis_fingerprint,

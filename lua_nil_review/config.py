@@ -9,6 +9,37 @@ from .common import sha256_hex
 
 
 @dataclass
+class SymbolTracingConfig:
+    enabled: bool = True
+    flatten_require_mode: str = "basename"
+    max_depth: int = 5
+    auto_silence_depth: int = 3
+    max_branch_count: int = 16
+    max_expanded_nodes: int = 64
+    max_unique_slices: int = 12
+    slice_mode: str = "logic_slice"
+    max_slice_lines: int = 60
+    module_resolution_overrides: dict[str, list[str]] = field(default_factory=dict)
+
+    def to_normalized_dict(self) -> dict[str, Any]:
+        return {
+            "enabled": bool(self.enabled),
+            "flatten_require_mode": self.flatten_require_mode,
+            "max_depth": int(self.max_depth),
+            "auto_silence_depth": int(self.auto_silence_depth),
+            "max_branch_count": int(self.max_branch_count),
+            "max_expanded_nodes": int(self.max_expanded_nodes),
+            "max_unique_slices": int(self.max_unique_slices),
+            "slice_mode": self.slice_mode,
+            "max_slice_lines": int(self.max_slice_lines),
+            "module_resolution_overrides": {
+                key: sorted(dict.fromkeys(paths))
+                for key, paths in sorted(self.module_resolution_overrides.items())
+            },
+        }
+
+
+@dataclass
 class ReviewConfig:
     include: list[str] = field(default_factory=lambda: ["*.lua", "**/*.lua"])
     exclude: list[str] = field(default_factory=list)
@@ -16,6 +47,7 @@ class ReviewConfig:
     safe_wrappers: list[str] = field(default_factory=list)
     suppressions: list[Any] = field(default_factory=list)
     baseline: str | None = None
+    symbol_tracing: SymbolTracingConfig = field(default_factory=SymbolTracingConfig)
 
     def to_normalized_dict(self) -> dict[str, Any]:
         suppressions = []
@@ -31,6 +63,7 @@ class ReviewConfig:
             "safe_wrappers": sorted(set(self.safe_wrappers)),
             "suppressions": sorted(suppressions, key=lambda item: json.dumps(item, sort_keys=True, ensure_ascii=False)),
             "baseline": self.baseline,
+            "symbol_tracing": self.symbol_tracing.to_normalized_dict(),
         }
         return normalized
 
@@ -62,6 +95,12 @@ def load_config(root: Path, config_path: str | None) -> tuple[ReviewConfig, Path
         safe_wrappers=list(raw.get("safe_wrappers", [])),
         suppressions=list(raw.get("suppressions", [])),
         baseline=raw.get("baseline"),
+        symbol_tracing=SymbolTracingConfig(
+            **{
+                **SymbolTracingConfig().to_normalized_dict(),
+                **dict(raw.get("symbol_tracing", {})),
+            }
+        ),
     )
     if "assert" not in config.nil_guards:
         config.nil_guards.append("assert")

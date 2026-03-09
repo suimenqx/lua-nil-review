@@ -14,6 +14,7 @@ RULE_ID = "lua.string-find-first-arg-nil"
 RULE_VERSION = "1"
 REPORT_TEMPLATE_VERSION = "1"
 PARSER_VERSION = "luaparser-4.0.0"
+SYMBOL_INDEX_VERSION = "1"
 SHARD_MAX_FINDINGS = 20
 SHARD_MAX_BYTES = 120 * 1024
 SHARD_TIMEOUT = timedelta(minutes=30)

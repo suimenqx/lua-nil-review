@@ -10,6 +10,7 @@ from .common import (
     PARSER_VERSION,
     RULE_ID,
     RULE_VERSION,
+    SYMBOL_INDEX_VERSION,
     atomic_write_text,
     SHARD_MAX_BYTES,
     SHARD_MAX_FINDINGS,
@@ -26,6 +27,7 @@ from .common import (
     utc_now,
 )
 from .config import ReviewConfig, load_config
+from .parsed_lua import parse_lua_file
 from .state import (
     acquire_lock,
     build_layout,
@@ -37,10 +39,18 @@ from .state import (
     save_manifest,
     touch_lock,
 )
+from .symbol_extractor import extract_file_symbols
+from .symbol_index import build_symbol_index, load_file_symbols_by_artifact
+from .symbol_query import candidate_slice_content
+from .tracer import TraceEngine, load_trace_bundle
 
 
 def analysis_fingerprint(config: ReviewConfig) -> str:
     return sha256_hex("|".join([RULE_VERSION, ANALYZER_VERSION, PARSER_VERSION, config.fingerprint()]))
+
+
+def symbol_fingerprint(config: ReviewConfig) -> str:
+    return sha256_hex("|".join([SYMBOL_INDEX_VERSION, PARSER_VERSION, config.fingerprint()]))
 
 
 def discover_lua_files(root: Path, config: ReviewConfig, state_dir: Path) -> list[Path]:
@@ -64,12 +74,18 @@ def run_analyze(*, root: Path, config_path: str | None, state_dir: Path, resume:
     try:
         manifest = load_or_rebuild_manifest(layout)
         fingerprint = analysis_fingerprint(config)
+        symbols_fp = symbol_fingerprint(config)
         previous_index = load_files_index(layout) if resume else {}
-        if not resume or manifest.get("analysis_fingerprint") != fingerprint:
+        if (
+            not resume
+            or manifest.get("analysis_fingerprint") != fingerprint
+            or manifest.get("symbol_fingerprint") != symbols_fp
+        ):
             reset_outputs_for_new_fingerprint(layout)
             manifest = load_or_rebuild_manifest(layout)
             previous_index = {}
         manifest["analysis_fingerprint"] = fingerprint
+        manifest["symbol_fingerprint"] = symbols_fp
         manifest["config_path"] = str(loaded_config_path.resolve()) if loaded_config_path else None
         manifest["stage"] = "analyzing"
         manifest["lock_owner"] = owner
@@ -77,6 +93,7 @@ def run_analyze(*, root: Path, config_path: str | None, state_dir: Path, resume:
 
         current_paths = discover_lua_files(root, config, layout.state_dir)
         entries: list[dict[str, Any]] = []
+        symbol_docs = []
         current_ids = set()
         manifest["files_total"] = len(current_paths)
         manifest["files_done"] = 0
@@ -88,37 +105,74 @@ def run_analyze(*, root: Path, config_path: str | None, state_dir: Path, resume:
             content = path.read_bytes()
             content_hash = sha256_bytes(content)
             analysis_path = layout.analysis_dir / f"{file_id}.json"
+            symbol_path = layout.symbol_files_dir / f"{file_id}.json"
             previous = previous_index.get(file_id)
             reusable = (
                 resume
                 and previous is not None
                 and previous.get("content_hash") == content_hash
                 and previous.get("analysis_fingerprint") == fingerprint
+                and previous.get("symbol_fingerprint") == symbols_fp
                 and analysis_path.exists()
+                and symbol_path.exists()
             )
             if reusable:
                 analysis_doc = load_json(analysis_path, default={})
+                symbol_doc = load_file_symbols_by_artifact(layout, previous.get("symbol_artifact_path"))
                 analysis_status = "reused"
+                symbol_status = "reused"
                 finding_count = len(analysis_doc.get("findings", []))
                 suppressed_findings = int(analysis_doc.get("suppressed_findings", 0))
                 parse_status = analysis_doc.get("parse_status", "ok")
                 parse_error = analysis_doc.get("parse_error")
+                symbol_parse_status = symbol_doc.parse_status if symbol_doc is not None else "error"
             else:
+                decoded = content.decode("utf-8", errors="replace")
+                parsed = None
+                try:
+                    parsed = parse_lua_file(relative, decoded)
+                except Exception:
+                    parsed = None
                 result = analyze_lua_file(
                     relative,
-                    content.decode("utf-8", errors="replace"),
+                    decoded,
                     config,
                     file_id=file_id,
                     content_hash=content_hash,
                     analysis_fingerprint=fingerprint,
                     snippets_dir=layout.snippets_dir,
+                    parsed_file=parsed,
                 )
                 atomic_write_json(analysis_path, result.to_dict())
+                symbol_doc = extract_file_symbols(
+                    relative,
+                    decoded,
+                    config,
+                    file_id=file_id,
+                    content_hash=content_hash,
+                    symbol_fingerprint=symbols_fp,
+                    parsed_file=parsed,
+                )
+                atomic_write_json(symbol_path, symbol_doc.to_dict())
                 analysis_status = "analyzed"
+                symbol_status = "analyzed"
                 finding_count = len(result.findings)
                 suppressed_findings = result.suppressed_findings
                 parse_status = result.parse_status
                 parse_error = result.parse_error
+                symbol_parse_status = symbol_doc.parse_status
+            if symbol_doc is None:
+                symbol_doc = extract_file_symbols(
+                    relative,
+                    content.decode("utf-8", errors="replace"),
+                    config,
+                    file_id=file_id,
+                    content_hash=content_hash,
+                    symbol_fingerprint=symbols_fp,
+                )
+                atomic_write_json(symbol_path, symbol_doc.to_dict())
+                symbol_status = "analyzed"
+                symbol_parse_status = symbol_doc.parse_status
             entry = {
                 "analysis_fingerprint": fingerprint,
                 "analysis_path": analysis_path.relative_to(layout.state_dir).as_posix(),
@@ -130,8 +184,13 @@ def run_analyze(*, root: Path, config_path: str | None, state_dir: Path, resume:
                 "parse_error": parse_error,
                 "parse_status": parse_status,
                 "suppressed_findings": suppressed_findings,
+                "symbol_artifact_path": symbol_path.relative_to(layout.state_dir).as_posix(),
+                "symbol_fingerprint": symbols_fp,
+                "symbol_parse_status": symbol_parse_status,
+                "symbol_status": symbol_status,
             }
             entries.append(entry)
+            symbol_docs.append(symbol_doc)
             save_files_index(layout, entries)
             manifest["files_done"] = index
             touch_lock(layout, owner)
@@ -143,13 +202,23 @@ def run_analyze(*, root: Path, config_path: str | None, state_dir: Path, resume:
             analysis_path = layout.state_dir / previous.get("analysis_path", "")
             if analysis_path.exists():
                 analysis_path.unlink()
+            symbol_artifact = layout.state_dir / previous.get("symbol_artifact_path", "")
+            if symbol_artifact.exists():
+                symbol_artifact.unlink()
 
+        symbol_summary = build_symbol_index(layout, symbol_docs, symbol_fingerprint=symbols_fp)
         manifest["stage"] = "analyzed"
         manifest["files_total"] = len(entries)
         manifest["files_done"] = len(entries)
+        manifest["symbol_index"] = symbol_summary
         save_files_index(layout, entries)
         save_manifest(layout, manifest)
-        return {"files_total": len(entries), "analysis_fingerprint": fingerprint}
+        return {
+            "files_total": len(entries),
+            "analysis_fingerprint": fingerprint,
+            "symbol_fingerprint": symbols_fp,
+            "symbol_index": symbol_summary,
+        }
     finally:
         release_lock(layout, owner)
 
@@ -161,7 +230,7 @@ def _active_findings(layout) -> tuple[list[dict[str, Any]], int]:
     for entry in entries:
         analysis_doc = load_json(layout.state_dir / entry["analysis_path"], default={})
         for finding in analysis_doc.get("findings", []):
-            if finding.get("suppressed"):
+            if finding.get("suppressed") or finding.get("trace_auto_silenced"):
                 suppressed += 1
                 continue
             active.append(finding)
@@ -180,11 +249,73 @@ def _shard_byte_size(layout, findings: list[dict[str, Any]]) -> int:
     return total
 
 
-def run_prepare_shards(*, root: Path, state_dir: Path, resume: bool) -> dict[str, Any]:
+def _load_prepare_config(root: Path, manifest: dict[str, Any], explicit_config_path: str | None) -> ReviewConfig:
+    config_path = explicit_config_path or manifest.get("config_path")
+    config, _ = load_config(root, config_path)
+    return config
+
+
+def _enrich_findings_with_traces(layout, root: Path, config: ReviewConfig) -> dict[str, int]:
+    if not config.symbol_tracing.enabled:
+        return {"traced": 0, "auto_silenced": 0, "escalated": 0}
+    engine = TraceEngine(root, layout, config)
+    traced = 0
+    silenced = 0
+    escalated = 0
+    active_finding_ids: set[str] = set()
+    for analysis_path in sorted(layout.analysis_dir.glob("*.json")):
+        analysis_doc = load_json(analysis_path, default={})
+        changed = False
+        findings = analysis_doc.get("findings", [])
+        for finding in findings:
+            if finding.get("finding_id"):
+                active_finding_ids.add(finding["finding_id"])
+            if finding.get("suppressed"):
+                continue
+            if finding.get("nil_state") == "nil":
+                finding["trace_status"] = "risky"
+                finding["trace_summary"] = "Local analysis already proves a nil value reaches the sink."
+                finding["trace_auto_silenced"] = False
+                finding["trace_branch_outcomes"] = []
+                continue
+            bundle = engine.trace_finding(finding)
+            traced += 1
+            max_depth_used = max((node.get("depth", 0) for node in bundle.get("nodes", [])), default=0)
+            auto_silenced = bundle.get("overall") == "safe" and max_depth_used <= config.symbol_tracing.auto_silence_depth + 1
+            if auto_silenced:
+                silenced += 1
+            if bundle.get("needs_source_escalation"):
+                escalated += 1
+            bundle["trace_auto_silenced"] = auto_silenced
+            bundle["max_depth_used"] = max_depth_used
+            atomic_write_json(layout.trace_bundles_dir / f"{finding['finding_id']}.json", bundle)
+            finding["trace_status"] = bundle.get("overall")
+            finding["trace_summary"] = bundle.get("summary")
+            finding["trace_bundle_path"] = f"trace_bundles/{finding['finding_id']}.json"
+            finding["trace_auto_silenced"] = auto_silenced
+            finding["trace_branch_outcomes"] = bundle.get("branch_outcomes", [])
+            finding["needs_source_escalation"] = bool(bundle.get("needs_source_escalation"))
+            finding["trace_definition_slice_paths"] = [
+                item.get("slice_path")
+                for item in bundle.get("branch_outcomes", [])
+                if item.get("slice_path")
+            ][: config.symbol_tracing.max_unique_slices]
+            changed = True
+        if changed:
+            atomic_write_json(analysis_path, analysis_doc)
+    for bundle_path in layout.trace_bundles_dir.glob("*.json"):
+        if bundle_path.stem in active_finding_ids or bundle_path.stem.startswith("callsite-"):
+            continue
+        bundle_path.unlink(missing_ok=True)
+    return {"traced": traced, "auto_silenced": silenced, "escalated": escalated}
+
+
+def run_prepare_shards(*, root: Path, state_dir: Path, resume: bool, config_path: str | None = None) -> dict[str, Any]:
     layout = build_layout(root, state_dir)
     owner = acquire_lock(layout, "prepare")
     try:
         manifest = load_or_rebuild_manifest(layout)
+        config = _load_prepare_config(root, manifest, config_path)
         manifest["stage"] = "sharding"
         manifest["lock_owner"] = owner
         save_manifest(layout, manifest)
@@ -192,6 +323,8 @@ def run_prepare_shards(*, root: Path, state_dir: Path, resume: bool) -> dict[str
             if shard.get("status") == "in_review" and is_stale(shard.get("heartbeat_at")):
                 shard["status"] = "pending"
                 shard["heartbeat_at"] = None
+
+        trace_summary = _enrich_findings_with_traces(layout, root, config)
 
         active, suppressed = _active_findings(layout)
         shards: list[list[dict[str, Any]]] = []
@@ -246,9 +379,14 @@ def run_prepare_shards(*, root: Path, state_dir: Path, resume: bool) -> dict[str
         manifest["shards_total"] = len(new_manifest_shards)
         manifest["shards_reviewed"] = len([item for item in new_manifest_shards.values() if item["status"] in {"reviewed", "merged"}])
         manifest["suppressed_findings"] = suppressed
+        manifest["trace_summary"] = trace_summary
         manifest["stage"] = "sharded"
         save_manifest(layout, manifest)
-        return {"shards_total": len(new_manifest_shards), "suppressed_findings": suppressed}
+        return {
+            "shards_total": len(new_manifest_shards),
+            "suppressed_findings": suppressed,
+            "trace_summary": trace_summary,
+        }
     finally:
         release_lock(layout, owner)
 
@@ -263,7 +401,13 @@ def _shard_payload(layout, shard_id: str) -> dict[str, Any]:
             path = layout.state_dir / relative
             if path.exists():
                 snippets.append({"path": relative, "content": path.read_text(encoding="utf-8")})
-        payload_findings.append({**finding, "snippets": snippets})
+        trace_bundle = load_trace_bundle(layout, finding["finding_id"])
+        trace_slices = []
+        for relative in finding.get("trace_definition_slice_paths", []):
+            content = candidate_slice_content(layout.root, layout.state_dir, relative)
+            if content is not None:
+                trace_slices.append({"path": relative, "content": content})
+        payload_findings.append({**finding, "snippets": snippets, "trace_bundle": trace_bundle, "trace_slices": trace_slices})
     template = {
         "shard_id": shard_id,
         "reviewer": "",
@@ -457,8 +601,10 @@ def run_merge(*, root: Path, state_dir: Path, config_path: str | None) -> dict[s
                         finding["message"],
                         f"- Confidence: {finding['confidence']}",
                         f"- Decision: {finding['decision']}",
+                        f"- Trace: {finding.get('trace_status', 'n/a')}",
                         f"- New vs baseline: {'yes' if finding['is_new'] else 'no'}",
                         f"- Rationale: {finding['rationale'] or 'n/a'}",
+                        f"- Trace summary: {finding.get('trace_summary', 'n/a')}",
                         "",
                     ]
                 )

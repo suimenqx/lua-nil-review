@@ -34,6 +34,11 @@ class StateLayout:
     findings_dir: Path
     reviews_dir: Path
     snippets_dir: Path
+    symbol_index_dir: Path
+    symbol_files_dir: Path
+    symbol_modules_dir: Path
+    symbol_slices_dir: Path
+    trace_bundles_dir: Path
     final_dir: Path
     lock_path: Path
 
@@ -50,6 +55,11 @@ def build_layout(root: Path, state_dir: Path) -> StateLayout:
         findings_dir=ensure_dir(state_dir / "findings"),
         reviews_dir=ensure_dir(state_dir / "reviews"),
         snippets_dir=ensure_dir(state_dir / "snippets"),
+        symbol_index_dir=ensure_dir(state_dir / "symbol_index"),
+        symbol_files_dir=ensure_dir(state_dir / "symbol_index" / "files"),
+        symbol_modules_dir=ensure_dir(state_dir / "symbol_index" / "modules"),
+        symbol_slices_dir=ensure_dir(state_dir / "symbol_slices"),
+        trace_bundles_dir=ensure_dir(state_dir / "trace_bundles"),
         final_dir=ensure_dir(state_dir / "final"),
         lock_path=state_dir / "run.lock",
     )
@@ -60,6 +70,7 @@ def default_manifest(layout: StateLayout) -> dict[str, Any]:
         "state_version": STATE_VERSION,
         "run_id": str(uuid4()),
         "analysis_fingerprint": "",
+        "symbol_fingerprint": "",
         "analyzer_version": ANALYZER_VERSION,
         "parser_version": PARSER_VERSION,
         "rule_version": RULE_VERSION,
@@ -73,6 +84,7 @@ def default_manifest(layout: StateLayout) -> dict[str, Any]:
         "shards_total": 0,
         "shards_reviewed": 0,
         "suppressed_findings": 0,
+        "trace_summary": {},
         "updated_at": utc_now(),
         "lock_owner": "",
         "shards": {},
@@ -111,6 +123,8 @@ def load_or_rebuild_manifest(layout: StateLayout) -> dict[str, Any]:
         manifest = rebuild_manifest(layout)
     manifest.setdefault("shards", {})
     manifest.setdefault("report_template_version", REPORT_TEMPLATE_VERSION)
+    manifest.setdefault("symbol_fingerprint", "")
+    manifest.setdefault("trace_summary", {})
     return manifest
 
 
@@ -153,4 +167,9 @@ def reset_outputs_for_new_fingerprint(layout: StateLayout) -> None:
     remove_children(layout.analysis_dir, suffixes=(".json",))
     remove_children(layout.findings_dir, suffixes=(".jsonl",))
     remove_children(layout.snippets_dir, suffixes=(".txt",))
+    remove_children(layout.symbol_files_dir, suffixes=(".json",))
+    remove_children(layout.symbol_modules_dir, suffixes=(".json",))
+    remove_children(layout.symbol_index_dir, suffixes=(".json",))
+    remove_children(layout.symbol_slices_dir, suffixes=(".txt",))
+    remove_children(layout.trace_bundles_dir, suffixes=(".json",))
     remove_children(layout.final_dir, suffixes=(".json", ".md"))
