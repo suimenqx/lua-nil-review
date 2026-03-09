@@ -134,11 +134,12 @@ class PipelineTestCase(unittest.TestCase):
         self.assertEqual({"nil", "maybe_nil"}, {finding["nil_state"] for finding in unsuppressed})
 
         prepared = self.prepare()
-        self.assertEqual(1, prepared["suppressed_findings"])
+        self.assertEqual(2, prepared["suppressed_findings"])
+        self.assertEqual(1, prepared["trace_summary"]["auto_filtered_low_confidence"])
         shard_files = list((self.state_dir / "findings").glob("*.jsonl"))
         self.assertEqual(1, len(shard_files))
         shard_findings = [json.loads(line) for line in shard_files[0].read_text(encoding="utf-8").splitlines() if line]
-        self.assertEqual(2, len(shard_findings))
+        self.assertEqual(1, len(shard_findings))
 
     def test_incremental_reuses_unchanged_files(self) -> None:
         self.write_file("a.lua", "local function a()\n  local y = nil\n  string.find(y, 'a')\nend\n")

@@ -48,6 +48,13 @@ class SymbolTracingTestCase(unittest.TestCase):
         )
         return json.loads(result.stdout)
 
+    def load_analysis_findings(self) -> list[dict]:
+        findings: list[dict] = []
+        for path in sorted(self.state_dir.joinpath("analysis").glob("*.json")):
+            payload = json.loads(path.read_text(encoding="utf-8"))
+            findings.extend(payload.get("findings", []))
+        return findings
+
     def test_jump_and_trace_capture_collision_branches(self) -> None:
         self.write_file(
             "main.lua",
@@ -228,6 +235,119 @@ class SymbolTracingTestCase(unittest.TestCase):
         expanded = self.run_wrapper("trace", "--file", "main.lua", "--line", "5", "--expr", "resolve", "--expand-node", "node-1")
         self.assertEqual("node-1", expanded["trace"]["expanded_node"])
         self.assertEqual("node-1", expanded["trace"]["expanded_node_detail"]["node_id"])
+
+    def test_risk_tiering_filters_unconfirmed_function_returns(self) -> None:
+        self.write_file(
+            "main.lua",
+            "local data = { user = { name = 'alice' } }\n"
+            "local function deterministic()\n"
+            "  local value = nil\n"
+            "  string.find(value, 'a')\n"
+            "end\n"
+            "local function missing_key()\n"
+            "  local value = data.user.email\n"
+            "  string.find(value, 'a')\n"
+            "end\n"
+            "local function medium(user)\n"
+            "  local value = user.email\n"
+            "  string.find(value, 'a')\n"
+            "end\n"
+            "local function low()\n"
+            "  local value = fetch_name()\n"
+            "  string.find(value, 'a')\n"
+            "end\n",
+        )
+
+        refresh = self.run_wrapper("refresh")
+        self.assertEqual(1, refresh["prepare"]["trace_summary"]["auto_filtered_low_confidence"])
+        self.assertEqual(3, refresh["prepare"]["trace_summary"]["visible_after_trace"])
+
+        findings_by_line = {finding["line"]: finding for finding in self.load_analysis_findings()}
+        self.assertEqual(1, findings_by_line[4]["risk_level"])
+        self.assertEqual("deterministic_nil", findings_by_line[4]["risk_category"])
+        self.assertEqual(1, findings_by_line[8]["risk_level"])
+        self.assertEqual("missing_local_table_key", findings_by_line[8]["risk_category"])
+        self.assertEqual(2, findings_by_line[12]["risk_level"])
+        self.assertEqual("local_unguarded_index", findings_by_line[12]["risk_category"])
+        self.assertEqual(3, findings_by_line[16]["risk_level"])
+        self.assertEqual("function_return_unverified", findings_by_line[16]["risk_category"])
+        self.assertFalse(findings_by_line[16]["human_review_visible"])
+        self.assertEqual("level3_unconfirmed_after_trace", findings_by_line[16]["auto_filtered_reason"])
+
+    def test_level3_risky_return_survives_trace_gate(self) -> None:
+        self.write_file(
+            "main.lua",
+            "local function resolve()\n"
+            "  return nil\n"
+            "end\n"
+            "local function demo()\n"
+            "  local value = resolve()\n"
+            "  string.find(value, 'a')\n"
+            "end\n",
+        )
+
+        refresh = self.run_wrapper("refresh")
+        self.assertEqual(1, refresh["prepare"]["shards_total"])
+        finding = self.load_analysis_findings()[0]
+        self.assertEqual(3, finding["risk_level"])
+        self.assertEqual("risky", finding["trace_status"])
+        self.assertTrue(finding["trace_gate_passed"])
+        self.assertTrue(finding["human_review_visible"])
+
+    def test_priority_prefix_selects_scenario_candidate(self) -> None:
+        self.write_config(
+            {
+                "symbol_tracing": {
+                    "module_resolution_priority": ["src/ui", "src/common"]
+                }
+            }
+        )
+        self.write_file(
+            "main.lua",
+            "local Config = require('config')\n"
+            "local function demo(name)\n"
+            "  local value = Config.get(name)\n"
+            "  string.find(value, 'a')\n"
+            "end\n",
+        )
+        self.write_file(
+            "src/ui/config.lua",
+            "local M = {}\n"
+            "function M.get(name)\n"
+            "  return name or ''\n"
+            "end\n"
+            "return M\n",
+        )
+        self.write_file(
+            "src/net/config.lua",
+            "local M = {}\n"
+            "function M.get(name)\n"
+            "  return nil\n"
+            "end\n"
+            "return M\n",
+        )
+
+        refresh = self.run_wrapper("refresh", "--config", str(self.repo / ".lua-nil-review.json"))
+        self.assertEqual(0, refresh["prepare"]["shards_total"])
+        self.assertEqual(1, refresh["prepare"]["trace_summary"]["auto_silenced"])
+
+        jump = self.run_wrapper(
+            "jump",
+            "--config",
+            str(self.repo / ".lua-nil-review.json"),
+            "--file",
+            "main.lua",
+            "--line",
+            "3",
+            "--expr",
+            "Config.get",
+        )
+        self.assertTrue(jump["jump"]["applied_priority"])
+        self.assertEqual("src/ui", jump["jump"]["matched_priority_prefix"])
+        self.assertEqual("priority_prefix", jump["jump"]["resolution_strategy"])
+        self.assertFalse(jump["jump"]["external_config_dependency"])
+        self.assertEqual(1, len(jump["jump"]["candidates"]))
+        self.assertEqual("src/ui/config.lua", jump["jump"]["candidates"][0]["file"])
 
     def test_stale_trace_bundle_is_removed_after_finding_disappears(self) -> None:
         self.write_file(

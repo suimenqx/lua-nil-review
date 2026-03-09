@@ -230,7 +230,10 @@ def _active_findings(layout) -> tuple[list[dict[str, Any]], int]:
     for entry in entries:
         analysis_doc = load_json(layout.state_dir / entry["analysis_path"], default={})
         for finding in analysis_doc.get("findings", []):
-            if finding.get("suppressed") or finding.get("trace_auto_silenced"):
+            if finding.get("suppressed") or finding.get("trace_auto_silenced") or finding.get("human_review_visible") is False:
+                suppressed += 1
+                continue
+            if finding.get("risk_level") == 3 and finding.get("trace_status") not in {"risky", "mixed"}:
                 suppressed += 1
                 continue
             active.append(finding)
@@ -257,33 +260,53 @@ def _load_prepare_config(root: Path, manifest: dict[str, Any], explicit_config_p
 
 def _enrich_findings_with_traces(layout, root: Path, config: ReviewConfig) -> dict[str, int]:
     if not config.symbol_tracing.enabled:
-        return {"traced": 0, "auto_silenced": 0, "escalated": 0}
+        return {"traced": 0, "auto_silenced": 0, "auto_filtered_low_confidence": 0, "escalated": 0, "visible_after_trace": 0, "level_1": 0, "level_2": 0, "level_3": 0}
     engine = TraceEngine(root, layout, config)
     traced = 0
     silenced = 0
+    low_confidence_filtered = 0
     escalated = 0
+    visible_after_trace = 0
+    risk_counts = {1: 0, 2: 0, 3: 0}
     active_finding_ids: set[str] = set()
     for analysis_path in sorted(layout.analysis_dir.glob("*.json")):
         analysis_doc = load_json(analysis_path, default={})
         changed = False
         findings = analysis_doc.get("findings", [])
         for finding in findings:
+            risk_level = int(finding.get("risk_level", 1 if finding.get("nil_state") == "nil" else 2))
+            if risk_level in risk_counts:
+                risk_counts[risk_level] += 1
             if finding.get("finding_id"):
                 active_finding_ids.add(finding["finding_id"])
             if finding.get("suppressed"):
+                finding["human_review_visible"] = False
+                finding["auto_filtered_reason"] = "suppressed"
                 continue
             if finding.get("nil_state") == "nil":
                 finding["trace_status"] = "risky"
                 finding["trace_summary"] = "Local analysis already proves a nil value reaches the sink."
                 finding["trace_auto_silenced"] = False
                 finding["trace_branch_outcomes"] = []
+                finding["trace_depth_policy"] = {
+                    "min_required_trace_depth": config.symbol_tracing.min_required_trace_depth,
+                    "configured_max_depth": config.symbol_tracing.max_depth,
+                    "trace_gate_required": bool(finding.get("trace_gate_required")),
+                }
+                finding["trace_gate_passed"] = True
+                finding["human_review_visible"] = True
+                finding["auto_filtered_reason"] = None
+                visible_after_trace += 1
                 continue
             bundle = engine.trace_finding(finding)
             traced += 1
             max_depth_used = max((node.get("depth", 0) for node in bundle.get("nodes", [])), default=0)
-            auto_silenced = bundle.get("overall") == "safe" and max_depth_used <= config.symbol_tracing.auto_silence_depth + 1
+            auto_silenced = bundle.get("overall") == "safe" and not bundle.get("external_config_dependency")
+            low_confidence_hidden = bool(risk_level == 3 and bundle.get("overall") not in {"risky", "mixed"} and not auto_silenced)
             if auto_silenced:
                 silenced += 1
+            if low_confidence_hidden:
+                low_confidence_filtered += 1
             if bundle.get("needs_source_escalation"):
                 escalated += 1
             bundle["trace_auto_silenced"] = auto_silenced
@@ -295,11 +318,29 @@ def _enrich_findings_with_traces(layout, root: Path, config: ReviewConfig) -> di
             finding["trace_auto_silenced"] = auto_silenced
             finding["trace_branch_outcomes"] = bundle.get("branch_outcomes", [])
             finding["needs_source_escalation"] = bool(bundle.get("needs_source_escalation"))
+            finding["trace_depth_policy"] = {
+                "min_required_trace_depth": config.symbol_tracing.min_required_trace_depth,
+                "configured_max_depth": config.symbol_tracing.max_depth,
+                "max_depth_used": max_depth_used,
+                "trace_gate_required": bool(finding.get("trace_gate_required")),
+            }
+            finding["trace_gate_passed"] = bool(
+                not finding.get("trace_gate_required") or bundle.get("overall") in {"risky", "mixed"}
+            )
+            finding["human_review_visible"] = not auto_silenced and not low_confidence_hidden
+            if auto_silenced:
+                finding["auto_filtered_reason"] = "trace_safe"
+            elif low_confidence_hidden:
+                finding["auto_filtered_reason"] = "level3_unconfirmed_after_trace"
+            else:
+                finding["auto_filtered_reason"] = None
             finding["trace_definition_slice_paths"] = [
                 item.get("slice_path")
                 for item in bundle.get("branch_outcomes", [])
                 if item.get("slice_path")
             ][: config.symbol_tracing.max_unique_slices]
+            if finding["human_review_visible"]:
+                visible_after_trace += 1
             changed = True
         if changed:
             atomic_write_json(analysis_path, analysis_doc)
@@ -307,7 +348,16 @@ def _enrich_findings_with_traces(layout, root: Path, config: ReviewConfig) -> di
         if bundle_path.stem in active_finding_ids or bundle_path.stem.startswith("callsite-"):
             continue
         bundle_path.unlink(missing_ok=True)
-    return {"traced": traced, "auto_silenced": silenced, "escalated": escalated}
+    return {
+        "traced": traced,
+        "auto_silenced": silenced,
+        "auto_filtered_low_confidence": low_confidence_filtered,
+        "escalated": escalated,
+        "visible_after_trace": visible_after_trace,
+        "level_1": risk_counts[1],
+        "level_2": risk_counts[2],
+        "level_3": risk_counts[3],
+    }
 
 
 def run_prepare_shards(*, root: Path, state_dir: Path, resume: bool, config_path: str | None = None) -> dict[str, Any]:
@@ -561,6 +611,7 @@ def run_merge(*, root: Path, state_dir: Path, config_path: str | None) -> dict[s
                     confirmed.append(enriched)
             shard["status"] = "merged"
 
+        trace_summary = manifest.get("trace_summary", {})
         summary = {
             "generated_at": utc_now(),
             "rule_id": RULE_ID,
@@ -575,10 +626,17 @@ def run_merge(*, root: Path, state_dir: Path, config_path: str | None) -> dict[s
                 "dismissed_findings": dismissed,
                 "suppressed_findings": manifest.get("suppressed_findings", 0),
                 "new_confirmed_findings": len([finding for finding in confirmed if finding["is_new"]]),
+                "auto_filtered_safe": int(trace_summary.get("auto_silenced", 0)),
+                "auto_filtered_low_confidence": int(trace_summary.get("auto_filtered_low_confidence", 0)),
+                "risk_level_1": int(trace_summary.get("level_1", 0)),
+                "risk_level_2": int(trace_summary.get("level_2", 0)),
+                "risk_level_3": int(trace_summary.get("level_3", 0)),
+                "human_review_candidates": int(trace_summary.get("visible_after_trace", 0)),
             },
             "confirmed_findings": confirmed,
             "needs_source_escalation": escalated,
             "pending_shards": pending_shards,
+            "trace_summary": trace_summary,
         }
         atomic_write_json(layout.final_dir / "summary.json", summary)
         report_lines = [
@@ -590,6 +648,9 @@ def run_merge(*, root: Path, state_dir: Path, config_path: str | None) -> dict[s
             f"- Confirmed findings: {summary['totals']['confirmed_findings']}",
             f"- Needs source escalation: {summary['totals']['needs_source_escalation']}",
             f"- Pending shards: {summary['totals']['pending_shards']}",
+            f"- Auto-filtered safe findings: {summary['totals']['auto_filtered_safe']}",
+            f"- Auto-filtered low-confidence call returns: {summary['totals']['auto_filtered_low_confidence']}",
+            f"- Risk level totals: L1={summary['totals']['risk_level_1']} L2={summary['totals']['risk_level_2']} L3={summary['totals']['risk_level_3']}",
             "",
         ]
         if confirmed:
@@ -599,6 +660,8 @@ def run_merge(*, root: Path, state_dir: Path, config_path: str | None) -> dict[s
                     [
                         f"### {finding['file']}:{finding['line']}",
                         finding["message"],
+                        f"- Risk level: Level {finding.get('risk_level', 'n/a')} ({finding.get('risk_tier', 'n/a')})",
+                        f"- Risk category: {finding.get('risk_category', 'n/a')}",
                         f"- Confidence: {finding['confidence']}",
                         f"- Decision: {finding['decision']}",
                         f"- Trace: {finding.get('trace_status', 'n/a')}",
@@ -608,9 +671,19 @@ def run_merge(*, root: Path, state_dir: Path, config_path: str | None) -> dict[s
                         "",
                     ]
                 )
+                for branch in finding.get("trace_branch_outcomes", []):
+                    report_lines.append(f"  - [{branch.get('file', 'unknown path')}] -> {branch.get('status', 'unknown')}")
+                if finding.get("trace_branch_outcomes"):
+                    report_lines.append("")
         if escalated:
             report_lines.extend(["## Needs Source Escalation", ""])
-            report_lines.extend([f"- {finding['file']}:{finding['line']} `{normalize_whitespace(finding['call_text'])}`" for finding in escalated])
+            for finding in escalated:
+                report_lines.append(
+                    f"- {finding['file']}:{finding['line']} `{normalize_whitespace(finding['call_text'])}` "
+                    f"(Level {finding.get('risk_level', 'n/a')}, trace={finding.get('trace_status', 'n/a')})"
+                )
+                for branch in finding.get("trace_branch_outcomes", []):
+                    report_lines.append(f"  - [{branch.get('file', 'unknown path')}] -> {branch.get('status', 'unknown')}")
             report_lines.append("")
         if pending_shards:
             report_lines.extend(["## Pending Shards", ""])

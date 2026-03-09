@@ -9,7 +9,7 @@ from pathlib import Path
 from typing import Any, Iterable
 
 STATE_VERSION = 1
-ANALYZER_VERSION = "0.1.0"
+ANALYZER_VERSION = "0.2.0"
 RULE_ID = "lua.string-find-first-arg-nil"
 RULE_VERSION = "1"
 REPORT_TEMPLATE_VERSION = "1"

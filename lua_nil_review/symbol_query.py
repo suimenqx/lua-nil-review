@@ -30,7 +30,7 @@ def jump_to_definition(
     active_config = config or load_config(root, None)[0]
 
     if symbol:
-        refs, used_override, external_config_dependency = _resolve_logical_symbol(
+        refs, used_override, external_config_dependency, resolution_strategy, matched_priority_prefix = _resolve_logical_symbol(
             repository,
             symbol,
             active_config=active_config,
@@ -40,7 +40,7 @@ def jump_to_definition(
     else:
         if not file or line is None or not expression:
             raise RuntimeError("Jump requires either --symbol or --file/--line/--expr.")
-        refs, resolution_kind, module_key, used_override, external_config_dependency = _resolve_callsite_expr(
+        refs, resolution_kind, module_key, used_override, external_config_dependency, resolution_strategy, matched_priority_prefix = _resolve_callsite_expr(
             repository,
             file,
             line,
@@ -60,6 +60,9 @@ def jump_to_definition(
         "candidates": candidates,
         "suppressed_duplicates": suppressed,
         "used_override": used_override,
+        "applied_priority": bool(matched_priority_prefix),
+        "matched_priority_prefix": matched_priority_prefix,
+        "resolution_strategy": resolution_strategy,
         "external_config_dependency": external_config_dependency,
         "overflow_candidates": overflow_count,
     }
@@ -74,10 +77,10 @@ def _resolve_logical_symbol(
     symbol: str,
     *,
     active_config: ReviewConfig,
-) -> tuple[list[dict[str, Any]], bool, bool]:
+) -> tuple[list[dict[str, Any]], bool, bool, str, str | None]:
     if "." not in symbol:
         globals_doc = repository.globals_doc()
-        return list(globals_doc.get(symbol, [])), False, False
+        return list(globals_doc.get(symbol, [])), False, False, "global_symbol", None
     module_key, member_name = symbol.rsplit(".", 1)
     module_doc = repository.module_doc(module_key)
     refs = list(module_doc.get("members", {}).get(member_name, []))
@@ -91,11 +94,11 @@ def _resolve_callsite_expr(
     expression: str,
     *,
     active_config: ReviewConfig,
-) -> tuple[list[dict[str, Any]], str, str | None, bool, bool]:
+) -> tuple[list[dict[str, Any]], str, str | None, bool, bool, str, str | None]:
     normalized = expression.replace(":", ".").strip()
     facts = repository.file_facts(file)
     if facts is None:
-        return [], "unknown_file", None, False, False
+        return [], "unknown_file", None, False, False, "unknown_file", None
 
     function_id = None
     for function in facts.functions:
@@ -110,8 +113,8 @@ def _resolve_callsite_expr(
             if function.local_name == normalized or function.qualified_name == normalized
         ]
         if local_refs:
-            return local_refs, "same_file_local", None, False, False
-        return list(repository.globals_doc().get(normalized, [])), "global_function", None, False, False
+            return local_refs, "same_file_local", None, False, False, "same_file_local", None
+        return list(repository.globals_doc().get(normalized, [])), "global_function", None, False, False, "global_function", None
 
     receiver_name, member_name = normalized.rsplit(".", 1)
     if receiver_name in facts.module_table_names:
@@ -120,7 +123,7 @@ def _resolve_callsite_expr(
             for function in facts.functions
             if function.receiver_name == receiver_name and function.member_name == member_name
         ]
-        return refs, "same_file_module_table", facts.logical_module_keys[0] if facts.logical_module_keys else None, False, False
+        return refs, "same_file_module_table", facts.logical_module_keys[0] if facts.logical_module_keys else None, False, False, "same_file_module_table", None
 
     visible_module_keys: list[str] = []
     for binding in facts.require_bindings:
@@ -134,8 +137,10 @@ def _resolve_callsite_expr(
     refs: list[dict[str, Any]] = []
     used_override = False
     external_config_dependency = False
+    resolution_strategy = "require_alias"
+    matched_priority_prefix: str | None = None
     for module_key in visible_module_keys:
-        resolved, module_override, module_external = _resolve_logical_symbol(
+        resolved, module_override, module_external, module_strategy, matched_prefix = _resolve_logical_symbol(
             repository,
             f"{module_key}.{member_name}",
             active_config=active_config,
@@ -143,18 +148,21 @@ def _resolve_callsite_expr(
         refs.extend(resolved)
         used_override = used_override or module_override
         external_config_dependency = external_config_dependency or module_external
+        if module_strategy != "direct":
+            resolution_strategy = module_strategy
+        matched_priority_prefix = matched_priority_prefix or matched_prefix
     if refs:
         resolution_kind = "collision_multi_candidate" if len({item['file'] for item in refs}) > 1 else "require_alias"
-        return refs, resolution_kind, visible_module_keys[0], used_override, external_config_dependency
+        return refs, resolution_kind, visible_module_keys[0], used_override, external_config_dependency, resolution_strategy, matched_priority_prefix
 
-    refs, used_override, external_config_dependency = _resolve_logical_symbol(
+    refs, used_override, external_config_dependency, resolution_strategy, matched_priority_prefix = _resolve_logical_symbol(
         repository,
         normalized,
         active_config=active_config,
     )
     if refs:
-        return refs, "logical_symbol", receiver_name, used_override, external_config_dependency
-    return [], "unresolved", receiver_name, False, False
+        return refs, "logical_symbol", receiver_name, used_override, external_config_dependency, resolution_strategy, matched_priority_prefix
+    return [], "unresolved", receiver_name, False, False, "unresolved", None
 
 
 def _apply_module_resolution(
@@ -162,18 +170,30 @@ def _apply_module_resolution(
     module_key: str,
     *,
     active_config: ReviewConfig,
-) -> tuple[list[dict[str, Any]], bool, bool]:
+) -> tuple[list[dict[str, Any]], bool, bool, str, str | None]:
     if not refs:
-        return [], False, False
+        return [], False, False, "unresolved", None
     overrides = active_config.symbol_tracing.module_resolution_overrides.get(module_key, [])
     if overrides:
         order = {path: index for index, path in enumerate(overrides)}
         filtered = [ref for ref in refs if ref["file"] in order]
         if filtered:
             filtered.sort(key=lambda item: (order[item["file"]], item["file"], item["function_id"]))
-            return filtered, True, False
+            return filtered, True, False, "override", None
+    for prefix in active_config.symbol_tracing.module_resolution_priority:
+        filtered = [ref for ref in refs if _matches_priority_prefix(ref["file"], prefix)]
+        if filtered:
+            filtered.sort(key=lambda item: (item["file"], item["qualified_name"], item["function_id"]))
+            return filtered, False, False, "priority_prefix", prefix
     refs.sort(key=lambda item: (item["file"], item["qualified_name"], item["function_id"]))
-    return refs, False, len({item["file"] for item in refs}) > 1
+    if len({item["file"] for item in refs}) > 1:
+        return refs, False, True, "collision_ambiguous", None
+    return refs, False, False, "direct", None
+
+
+def _matches_priority_prefix(relative_path: str, prefix: str) -> bool:
+    normalized = prefix.rstrip("/")
+    return relative_path == normalized or relative_path.startswith(f"{normalized}/")
 
 
 def _materialize_candidates(

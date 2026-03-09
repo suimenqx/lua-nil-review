@@ -14,19 +14,24 @@ class SymbolTracingConfig:
     flatten_require_mode: str = "basename"
     max_depth: int = 5
     auto_silence_depth: int = 3
+    min_required_trace_depth: int = 3
     max_branch_count: int = 16
     max_expanded_nodes: int = 64
     max_unique_slices: int = 12
     slice_mode: str = "logic_slice"
     max_slice_lines: int = 60
     module_resolution_overrides: dict[str, list[str]] = field(default_factory=dict)
+    module_resolution_priority: list[str] = field(default_factory=list)
+    default_visible_risk_levels: list[int] = field(default_factory=lambda: [1, 2])
 
     def to_normalized_dict(self) -> dict[str, Any]:
+        max_depth = max(int(self.max_depth), int(self.min_required_trace_depth))
         return {
             "enabled": bool(self.enabled),
             "flatten_require_mode": self.flatten_require_mode,
-            "max_depth": int(self.max_depth),
+            "max_depth": max_depth,
             "auto_silence_depth": int(self.auto_silence_depth),
+            "min_required_trace_depth": int(self.min_required_trace_depth),
             "max_branch_count": int(self.max_branch_count),
             "max_expanded_nodes": int(self.max_expanded_nodes),
             "max_unique_slices": int(self.max_unique_slices),
@@ -36,6 +41,8 @@ class SymbolTracingConfig:
                 key: sorted(dict.fromkeys(paths))
                 for key, paths in sorted(self.module_resolution_overrides.items())
             },
+            "module_resolution_priority": list(dict.fromkeys(self.module_resolution_priority)),
+            "default_visible_risk_levels": sorted({int(level) for level in self.default_visible_risk_levels}),
         }
 
 

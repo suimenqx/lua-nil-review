@@ -50,3 +50,11 @@ If the skill is installed at user scope instead, resolve the actual install path
 - Use `trace --file/--line/--expr` when a direct callsite needs manual expansion outside the normal shard flow.
 - Mark a finding as `needs_source_escalation` when the snippet set is insufficient.
 - Do not read an entire 3000+ line file unless escalation is necessary.
+
+## Trace Gating
+
+- `prepare` enriches every unsuppressed `maybe_nil` finding with a persisted trace bundle before sharding.
+- Level `3` findings are not human-visible by default. They only enter shards when trace proves a `risky` or `mixed` branch.
+- Safe traces are auto-silenced and counted in `manifest.json -> trace_summary -> auto_silenced`.
+- Unconfirmed Level `3` traces are auto-filtered and counted in `manifest.json -> trace_summary -> auto_filtered_low_confidence`.
+- `final/report.md` surfaces collision branch outcomes as `[path] -> status` lines so scenario-dependent results stay explicit.

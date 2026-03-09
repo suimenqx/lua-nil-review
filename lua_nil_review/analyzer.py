@@ -46,9 +46,11 @@ class EvidenceEvent:
 class ValueInfo:
     nil_state: NilState
     trace: list[EvidenceEvent] = field(default_factory=list)
+    origin_kind: str = "unknown"
+    table_shape: dict[str, "ValueInfo"] | None = None
 
     def clone(self) -> "ValueInfo":
-        return ValueInfo(self.nil_state, deepcopy(self.trace))
+        return ValueInfo(self.nil_state, deepcopy(self.trace), self.origin_kind, deepcopy(self.table_shape))
 
 
 @dataclass
@@ -109,7 +111,12 @@ def merge_envs(*envs: dict[str, ValueInfo]) -> dict[str, ValueInfo]:
             if name not in merged:
                 merged[name] = info.clone()
                 continue
-            merged[name] = ValueInfo(join_states(merged[name].nil_state, info.nil_state), merged[name].trace)
+            merged[name] = ValueInfo(
+                join_states(merged[name].nil_state, info.nil_state),
+                merged[name].trace,
+                merged[name].origin_kind if merged[name].origin_kind == info.origin_kind else "merged",
+                deepcopy(merged[name].table_shape) if merged[name].table_shape == info.table_shape else None,
+            )
     return merged
 
 
@@ -150,7 +157,14 @@ class LuaNilAnalyzer:
         self.functions_analyzed += 1
         self._process_block(root.body.body, {}, context, snippets_dir)
 
-    def _analyze_function(self, node: Any, function_name: str, snippets_dir: Path) -> None:
+    def _analyze_function(
+        self,
+        node: Any,
+        function_name: str,
+        snippets_dir: Path,
+        *,
+        captured_env: dict[str, ValueInfo] | None = None,
+    ) -> None:
         line, column = self.source.line_column_for_node(node)
         context = FunctionContext(
             function_name=function_name,
@@ -160,7 +174,7 @@ class LuaNilAnalyzer:
             signature_column=column,
             signature_text=self.source.line_text(line),
         )
-        env: dict[str, ValueInfo] = {}
+        env: dict[str, ValueInfo] = {name: value.clone() for name, value in (captured_env or {}).items()}
         for arg in getattr(node, "args", []):
             if isinstance(arg, N.Name):
                 env[arg.id] = ValueInfo(
@@ -175,6 +189,7 @@ class LuaNilAnalyzer:
                             code=context.signature_text,
                         )
                     ],
+                    origin_kind="parameter",
                 )
         self.functions_analyzed += 1
         self._process_block(node.body.body, env, context, snippets_dir)
@@ -190,14 +205,14 @@ class LuaNilAnalyzer:
         shadowed: dict[str, Any] = {}
         for statement in statements:
             if isinstance(statement, N.LocalFunction):
-                self._analyze_function(statement, self._name_for_function(statement.name), snippets_dir)
+                self._analyze_function(statement, self._name_for_function(statement.name), snippets_dir, captured_env=env)
                 if statement.name.id not in shadowed:
                     shadowed[statement.name.id] = env.get(statement.name.id, MISSING)
                 env[statement.name.id] = self._non_nil_from_node(statement, f"Local function '{statement.name.id}' is non_nil.")
                 continue
 
             if isinstance(statement, N.Function):
-                self._analyze_function(statement, self._name_for_function(statement.name), snippets_dir)
+                self._analyze_function(statement, self._name_for_function(statement.name), snippets_dir, captured_env=env)
                 if isinstance(statement.name, N.Name):
                     env[statement.name.id] = self._non_nil_from_node(statement, f"Function '{statement.name.id}' is non_nil.")
                 continue
@@ -209,14 +224,24 @@ class LuaNilAnalyzer:
                 env = self._apply_assignment(statement.targets, statement.values, env)
                 for value in statement.values:
                     if isinstance(value, N.AnonymousFunction):
-                        self._analyze_function(value, f"anonymous@{self.source.line_column_for_node(value)[0]}", snippets_dir)
+                        self._analyze_function(
+                            value,
+                            f"anonymous@{self.source.line_column_for_node(value)[0]}",
+                            snippets_dir,
+                            captured_env=env,
+                        )
                 continue
 
             if isinstance(statement, N.Assign):
                 env = self._apply_assignment(statement.targets, statement.values, env)
                 for value in statement.values:
                     if isinstance(value, N.AnonymousFunction):
-                        self._analyze_function(value, f"anonymous@{self.source.line_column_for_node(value)[0]}", snippets_dir)
+                        self._analyze_function(
+                            value,
+                            f"anonymous@{self.source.line_column_for_node(value)[0]}",
+                            snippets_dir,
+                            captured_env=env,
+                        )
                 continue
 
             if isinstance(statement, N.Call):
@@ -289,6 +314,7 @@ class LuaNilAnalyzer:
                 info = ValueInfo(
                     "nil",
                     [EvidenceEvent(kind="assignment", state="nil", message=f"Assigned implicit nil to '{target.id}'.", line=line, column=column, code=self.source.line_text(line))],
+                    origin_kind="literal_nil",
                 )
                 message = f"Assigned implicit nil to '{target.id}'."
             info.trace.append(EvidenceEvent(kind="assignment", state=info.nil_state, message=message, line=line, column=column, code=self.source.line_text(line)))
@@ -307,6 +333,7 @@ class LuaNilAnalyzer:
         updated[target.id] = ValueInfo(
             "non_nil",
             [EvidenceEvent(kind="guard", state="non_nil", message=f"Call to nil guard '{call_name}' narrows '{target.id}' to non_nil.", line=line, column=column, code=self.source.line_text(line))],
+            origin_kind="guarded_non_nil",
         )
         return updated
 
@@ -319,6 +346,7 @@ class LuaNilAnalyzer:
         updated[name] = ValueInfo(
             state,
             [EvidenceEvent(kind="guard", state=state, message=f"Condition narrows '{name}' to {state}.", line=line, column=column, code=self.source.line_text(line))],
+            origin_kind="guarded_nil" if state == "nil" else "guarded_non_nil",
         )
         return updated
 
@@ -362,6 +390,7 @@ class LuaNilAnalyzer:
         trace.append(EvidenceEvent(kind="sink", state=arg_info.nil_state, message=f"`string.find` receives '{arg_text}' as its first argument.", line=line, column=column, code=self.source.line_text(line)))
         finding_id = sha256_hex("|".join([RULE_ID, self.relative_path, context.function_anchor, str(line), normalize_whitespace(call_text), normalize_whitespace(arg_text)]))
         snippet_paths = self._write_snippets(finding_id, trace, snippets_dir)
+        risk = self._risk_metadata(arg_info)
         finding = {
             "finding_id": finding_id,
             "rule_id": RULE_ID,
@@ -374,7 +403,13 @@ class LuaNilAnalyzer:
             "call_text": call_text,
             "arg_text": arg_text,
             "nil_state": arg_info.nil_state,
-            "confidence": "high" if arg_info.nil_state == "nil" else "medium",
+            "confidence": risk["confidence"],
+            "risk_level": risk["risk_level"],
+            "risk_tier": risk["risk_tier"],
+            "risk_category": risk["risk_category"],
+            "origin_kind": arg_info.origin_kind,
+            "default_human_review": risk["default_human_review"],
+            "trace_gate_required": risk["trace_gate_required"],
             "evidence_trace": [event.to_dict() for event in trace],
             "snippet_paths": snippet_paths,
             "needs_source_escalation": False,
@@ -444,43 +479,185 @@ class LuaNilAnalyzer:
             if info is not None:
                 return info.clone()
             line, column = self.source.line_column_for_node(expression)
-            return ValueInfo("unknown", [EvidenceEvent(kind="name", state="unknown", message=f"Name '{expression.id}' is unresolved by the local-flow analyzer.", line=line, column=column, code=self.source.line_text(line))])
+            return ValueInfo(
+                "unknown",
+                [EvidenceEvent(kind="name", state="unknown", message=f"Name '{expression.id}' is unresolved by the local-flow analyzer.", line=line, column=column, code=self.source.line_text(line))],
+                origin_kind="unknown_name",
+            )
         if isinstance(expression, N.Nil):
             line, column = self.source.line_column_for_node(expression)
-            return ValueInfo("nil", [EvidenceEvent(kind="literal", state="nil", message="Literal nil.", line=line, column=column, code="nil")])
-        if isinstance(expression, (N.String, N.Number, N.Table, N.TrueExpr, N.FalseExpr, N.AnonymousFunction)):
+            return ValueInfo("nil", [EvidenceEvent(kind="literal", state="nil", message="Literal nil.", line=line, column=column, code="nil")], origin_kind="literal_nil")
+        if isinstance(expression, N.Table):
+            return self._table_literal_value(expression, env)
+        if isinstance(expression, (N.String, N.Number, N.TrueExpr, N.FalseExpr, N.AnonymousFunction)):
             return self._non_nil_from_node(expression, f"Expression '{normalize_whitespace(self.source.node_text(expression))}' is non_nil.")
         if isinstance(expression, N.Index):
-            line, column = self.source.line_column_for_node(expression)
-            return ValueInfo("maybe_nil", [EvidenceEvent(kind="index", state="maybe_nil", message=f"Indexed expression '{normalize_whitespace(self.source.node_text(expression))}' is treated as maybe_nil.", line=line, column=column, code=self.source.line_text(line))])
+            return self._eval_index_expression(expression, env)
         if isinstance(expression, N.Call):
             call_name = self._qualified_name(expression.func)
             if call_name in set(self.config.safe_wrappers) | BUILTIN_NON_NIL_CALLS:
                 return self._non_nil_from_node(expression, f"Call '{call_name}' is treated as returning non_nil.")
             line, column = self.source.line_column_for_node(expression)
-            return ValueInfo("maybe_nil", [EvidenceEvent(kind="call", state="maybe_nil", message=f"Return value of '{normalize_whitespace(self.source.node_text(expression))}' is treated as maybe_nil.", line=line, column=column, code=self.source.line_text(line))])
+            return ValueInfo(
+                "maybe_nil",
+                [EvidenceEvent(kind="call", state="maybe_nil", message=f"Return value of '{normalize_whitespace(self.source.node_text(expression))}' is treated as maybe_nil.", line=line, column=column, code=self.source.line_text(line))],
+                origin_kind="function_return",
+            )
         if isinstance(expression, N.OrLoOp):
             left = self._eval_expression(expression.left, env)
             right = self._eval_expression(expression.right, env)
             if right.nil_state == "non_nil":
                 return right
-            return ValueInfo(join_states(left.nil_state, right.nil_state), left.trace + right.trace)
+            return ValueInfo(
+                join_states(left.nil_state, right.nil_state),
+                left.trace + right.trace,
+                left.origin_kind if left.origin_kind == right.origin_kind else "merged",
+            )
         if isinstance(expression, N.AndLoOp):
             left = self._eval_expression(expression.left, env)
             right = self._eval_expression(expression.right, env)
             if left.nil_state in {"nil", "maybe_nil"}:
-                return ValueInfo("maybe_nil", left.trace + right.trace)
+                return ValueInfo("maybe_nil", left.trace + right.trace, left.origin_kind)
             return right
         if isinstance(expression, N.BinaryOp):
             return self._non_nil_from_node(expression, f"Binary expression '{normalize_whitespace(self.source.node_text(expression))}' is treated as non_nil.")
         if isinstance(expression, N.UnaryOp):
             return self._non_nil_from_node(expression, f"Unary expression '{normalize_whitespace(self.source.node_text(expression))}' is treated as non_nil.")
         line, column = self.source.line_column_for_node(expression)
-        return ValueInfo("unknown", [EvidenceEvent(kind="expression", state="unknown", message=f"Unsupported expression '{type(expression).__name__}' is treated as unknown.", line=line, column=column, code=self.source.line_text(line))])
+        return ValueInfo(
+            "unknown",
+            [EvidenceEvent(kind="expression", state="unknown", message=f"Unsupported expression '{type(expression).__name__}' is treated as unknown.", line=line, column=column, code=self.source.line_text(line))],
+            origin_kind="unknown_expr",
+        )
 
     def _non_nil_from_node(self, node: Any, message: str) -> ValueInfo:
         line, column = self.source.line_column_for_node(node)
-        return ValueInfo("non_nil", [EvidenceEvent(kind="non_nil", state="non_nil", message=message, line=line, column=column, code=self.source.line_text(line))])
+        return ValueInfo("non_nil", [EvidenceEvent(kind="non_nil", state="non_nil", message=message, line=line, column=column, code=self.source.line_text(line))], origin_kind="non_nil")
+
+    def _table_literal_value(self, table_node: N.Table, env: dict[str, ValueInfo]) -> ValueInfo:
+        line, column = self.source.line_column_for_node(table_node)
+        shape: dict[str, ValueInfo] = {}
+        implicit_index = 1
+        for field in getattr(table_node, "fields", []):
+            if not isinstance(field, N.Field):
+                continue
+            key = self._table_key(getattr(field, "key", None))
+            if key is None and getattr(field, "key", None) is None:
+                key = str(implicit_index)
+                implicit_index += 1
+            if key is None:
+                continue
+            shape[key] = self._eval_expression(field.value, env).clone()
+        return ValueInfo(
+            "non_nil",
+            [EvidenceEvent(kind="table", state="non_nil", message=f"Table literal '{normalize_whitespace(self.source.node_text(table_node))}' is non_nil.", line=line, column=column, code=self.source.line_text(line))],
+            origin_kind="table_literal",
+            table_shape=shape,
+        )
+
+    def _eval_index_expression(self, expression: N.Index, env: dict[str, ValueInfo]) -> ValueInfo:
+        line, column = self.source.line_column_for_node(expression)
+        expr_text = normalize_whitespace(self.source.node_text(expression))
+        base_info = self._eval_expression(expression.value, env)
+        key = self._table_key(expression.idx)
+        if key is not None and base_info.table_shape is not None:
+            resolved = base_info.table_shape.get(key)
+            if resolved is None:
+                return ValueInfo(
+                    "nil",
+                    self._compact_trace(
+                        base_info.trace
+                        + [
+                            EvidenceEvent(
+                                kind="index",
+                                state="nil",
+                                message=f"Field '{key}' is absent from local table expression '{normalize_whitespace(self.source.node_text(expression.value))}'.",
+                                line=line,
+                                column=column,
+                                code=self.source.line_text(line),
+                            )
+                        ]
+                    ),
+                    origin_kind="missing_table_key",
+                )
+            value = resolved.clone()
+            value.trace.append(
+                EvidenceEvent(
+                    kind="index",
+                    state=value.nil_state,
+                    message=f"Resolved local table field '{key}' from '{expr_text}'.",
+                    line=line,
+                    column=column,
+                    code=self.source.line_text(line),
+                )
+            )
+            if value.origin_kind in {"table_literal", "non_nil"}:
+                value.origin_kind = "field_read"
+            return self._compact_value(value)
+        return ValueInfo(
+            "maybe_nil",
+            self._compact_trace(
+                base_info.trace
+                + [
+                    EvidenceEvent(
+                        kind="index",
+                        state="maybe_nil",
+                        message=f"Indexed expression '{expr_text}' is treated as maybe_nil without a visible guard.",
+                        line=line,
+                        column=column,
+                        code=self.source.line_text(line),
+                    )
+                ]
+            ),
+            origin_kind="field_read",
+        )
+
+    def _table_key(self, node: Any) -> str | None:
+        if isinstance(node, N.Name):
+            return node.id
+        if isinstance(node, N.String):
+            return getattr(node, "s", None)
+        if isinstance(node, N.Number):
+            return str(getattr(node, "n", ""))
+        return None
+
+    def _risk_metadata(self, info: ValueInfo) -> dict[str, Any]:
+        if info.nil_state == "nil":
+            if info.origin_kind == "missing_table_key":
+                category = "missing_local_table_key"
+            else:
+                category = "deterministic_nil"
+            return {
+                "risk_level": 1,
+                "risk_tier": "high",
+                "risk_category": category,
+                "confidence": "high",
+                "default_human_review": True,
+                "trace_gate_required": False,
+            }
+        if info.origin_kind == "function_return":
+            return {
+                "risk_level": 3,
+                "risk_tier": "low",
+                "risk_category": "function_return_unverified",
+                "confidence": "low",
+                "default_human_review": False,
+                "trace_gate_required": True,
+            }
+        if info.origin_kind == "field_read":
+            category = "local_unguarded_index"
+        elif info.origin_kind == "parameter":
+            category = "unguarded_parameter"
+        else:
+            category = "local_maybe_nil"
+        return {
+            "risk_level": 2,
+            "risk_tier": "medium",
+            "risk_category": category,
+            "confidence": "medium",
+            "default_human_review": True,
+            "trace_gate_required": False,
+        }
 
     def _qualified_name(self, node: Any) -> str | None:
         if isinstance(node, N.Name):
