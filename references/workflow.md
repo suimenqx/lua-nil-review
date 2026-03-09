@@ -1,5 +1,7 @@
 # Workflow
 
+See [architecture.md](architecture.md) first if you want the visual version of this pipeline before reading the detailed state and resume rules.
+
 ## Persisted State
 
 The pipeline writes all durable state under `artifacts/string-find-nil/`.

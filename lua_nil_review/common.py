@@ -70,7 +70,7 @@ def normalize_whitespace(value: str) -> str:
 def atomic_write_text(path: Path, content: str) -> None:
     ensure_dir(path.parent)
     temp_path = path.with_suffix(path.suffix + ".tmp")
-    temp_path.write_text(content, encoding="utf-8")
+    temp_path.write_text(content, encoding="utf-8", newline="\n")
     os.replace(temp_path, path)
 
 

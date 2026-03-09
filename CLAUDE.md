@@ -14,4 +14,5 @@ Follow the persisted review pipeline instead of reading a giant Lua codebase dir
 ## Notes
 
 - Use `needs_source_escalation` when the current snippet set is not enough. Keep the review incremental and resumable.
+- Read `references/architecture.md` for visual diagrams of the runtime layers, persisted artifacts, and adapter surfaces.
 - `agents/openai.yaml` is OpenAI/Codex UI metadata only. Gemini CLI and Claude Code use the root-level instruction files instead.

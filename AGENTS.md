@@ -14,4 +14,5 @@ Use the persisted workflow in this repository for large Lua nil-risk reviews.
 ## Notes
 
 - Read `references/workflow.md` and `references/configuration.md` when you need the artifact layout or review JSON fields.
+- Read `references/architecture.md` for visual diagrams of the runtime layers, persisted artifacts, and adapter surfaces.
 - `agents/openai.yaml` is OpenAI/Codex UI metadata only. Gemini CLI and Claude Code use the root-level instruction files instead.

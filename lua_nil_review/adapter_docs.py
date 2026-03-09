@@ -68,7 +68,16 @@ def render_adapter_doc(adapter: AdapterDoc) -> str:
         "",
     ]
     sections.extend([f"{index}. {step}" for index, step in enumerate(COMMON_CYCLE, start=1)])
-    sections.extend(["", "## Notes", "", f"- {adapter.extra_note}", "- `agents/openai.yaml` is OpenAI/Codex UI metadata only. Gemini CLI and Claude Code use the root-level instruction files instead."])
+    sections.extend(
+        [
+            "",
+            "## Notes",
+            "",
+            f"- {adapter.extra_note}",
+            "- Read `references/architecture.md` for visual diagrams of the runtime layers, persisted artifacts, and adapter surfaces.",
+            "- `agents/openai.yaml` is OpenAI/Codex UI metadata only. Gemini CLI and Claude Code use the root-level instruction files instead.",
+        ]
+    )
     if adapter.include_example:
         sections.extend(["", "## Review JSON Example", "", REVIEW_JSON_EXAMPLE])
     sections.append("")

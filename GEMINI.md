@@ -14,6 +14,7 @@ Use this repository as the source for a persisted Lua nil-risk review skill.
 ## Notes
 
 - For real use on another repository, prefer `gemini skills link <repo> --scope workspace` or `gemini skills install <repo> --scope workspace`, then call the installed wrapper from `.gemini/skills/lua-nil-review/scripts/`.
+- Read `references/architecture.md` for visual diagrams of the runtime layers, persisted artifacts, and adapter surfaces.
 - `agents/openai.yaml` is OpenAI/Codex UI metadata only. Gemini CLI and Claude Code use the root-level instruction files instead.
 
 ## Review JSON Example

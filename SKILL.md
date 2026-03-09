@@ -40,5 +40,6 @@ If neither path exists, resolve the installed skill location with `gemini skills
 
 ## References
 
+- Read [references/architecture.md](references/architecture.md) for visual diagrams of the runtime layers, persisted artifacts, and adapter surfaces.
 - Read [references/workflow.md](references/workflow.md) for the persisted state machine, install modes, and resume behavior.
 - Read [references/configuration.md](references/configuration.md) for config keys, wrapper usage, review JSON shape, and output files.
