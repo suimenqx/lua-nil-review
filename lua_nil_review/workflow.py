@@ -31,6 +31,7 @@ from .parsed_lua import parse_lua_file
 from .state import (
     acquire_lock,
     build_layout,
+    default_prepare_progress,
     load_files_index,
     load_or_rebuild_manifest,
     release_lock,
@@ -89,6 +90,7 @@ def run_analyze(*, root: Path, config_path: str | None, state_dir: Path, resume:
         manifest["config_path"] = str(loaded_config_path.resolve()) if loaded_config_path else None
         manifest["stage"] = "analyzing"
         manifest["lock_owner"] = owner
+        manifest["prepare_progress"] = default_prepare_progress()
         save_manifest(layout, manifest)
 
         current_paths = discover_lua_files(root, config, layout.state_dir)
@@ -255,9 +257,35 @@ def _load_prepare_config(root: Path, manifest: dict[str, Any], explicit_config_p
     return config
 
 
-def _enrich_findings_with_traces(layout, root: Path, config: ReviewConfig) -> dict[str, int]:
+def _count_prepare_candidates(layout) -> tuple[int, int]:
+    findings_total = 0
+    trace_candidates_total = 0
+    for analysis_path in sorted(layout.analysis_dir.glob("*.json")):
+        analysis_doc = load_json(analysis_path, default={})
+        for finding in analysis_doc.get("findings", []):
+            if finding.get("suppressed"):
+                continue
+            findings_total += 1
+            if finding.get("nil_state") != "nil":
+                trace_candidates_total += 1
+    return findings_total, trace_candidates_total
+
+
+def _save_prepare_progress(layout, manifest: dict[str, Any], owner: str, progress: dict[str, Any]) -> None:
+    manifest["prepare_progress"] = progress
+    touch_lock(layout, owner)
+    save_manifest(layout, manifest)
+
+
+def _enrich_findings_with_traces(layout, root: Path, config: ReviewConfig, manifest: dict[str, Any], owner: str) -> dict[str, int]:
     if not config.symbol_tracing.enabled:
         return {"traced": 0, "auto_silenced": 0, "auto_filtered_low_confidence": 0, "escalated": 0, "visible_after_trace": 0, "level_1": 0, "level_2": 0, "level_3": 0, "agentic_retraced": 0, "agentic_improved": 0, "agentic_promoted_safe": 0, "agentic_frontier_jumps": 0}
+    findings_total, trace_candidates_total = _count_prepare_candidates(layout)
+    progress = default_prepare_progress()
+    progress["phase"] = "trace_enrichment"
+    progress["findings_total"] = findings_total
+    progress["trace_candidates_total"] = trace_candidates_total
+    _save_prepare_progress(layout, manifest, owner, progress)
     traced = 0
     silenced = 0
     escalated = 0
@@ -282,6 +310,9 @@ def _enrich_findings_with_traces(layout, root: Path, config: ReviewConfig) -> di
                 finding["human_review_visible"] = False
                 finding["auto_filtered_reason"] = "suppressed"
                 continue
+            progress["current_finding_id"] = finding.get("finding_id")
+            progress["current_file"] = finding.get("file")
+            progress["current_line"] = finding.get("line")
             if finding.get("nil_state") == "nil":
                 finding["trace_status"] = "risky"
                 finding["trace_summary"] = "Local analysis already proves a nil value reaches the sink."
@@ -296,9 +327,14 @@ def _enrich_findings_with_traces(layout, root: Path, config: ReviewConfig) -> di
                 finding["human_review_visible"] = True
                 finding["auto_filtered_reason"] = None
                 visible_after_trace += 1
+                progress["findings_done"] += 1
+                progress["visible_after_trace"] = visible_after_trace
+                progress["auto_silenced"] = silenced
+                _save_prepare_progress(layout, manifest, owner, progress)
                 continue
             bundle = _trace_finding_with_strategy(root=root, layout=layout, config=config, finding=finding)
             traced += 1
+            progress["trace_candidates_done"] += 1
             strategy = bundle.get("agentic_strategy", {})
             if strategy.get("triggered"):
                 agentic_retraced += 1
@@ -352,6 +388,14 @@ def _enrich_findings_with_traces(layout, root: Path, config: ReviewConfig) -> di
             ][: config.symbol_tracing.max_unique_slices]
             if finding["human_review_visible"]:
                 visible_after_trace += 1
+            progress["findings_done"] += 1
+            progress["visible_after_trace"] = visible_after_trace
+            progress["auto_silenced"] = silenced
+            progress["agentic_retraced"] = agentic_retraced
+            progress["agentic_improved"] = agentic_improved
+            progress["agentic_promoted_safe"] = agentic_promoted_safe
+            progress["agentic_frontier_jumps"] = agentic_frontier_jumps
+            _save_prepare_progress(layout, manifest, owner, progress)
             changed = True
         if changed:
             atomic_write_json(analysis_path, analysis_doc)
@@ -383,15 +427,23 @@ def run_prepare_shards(*, root: Path, state_dir: Path, resume: bool, config_path
         config = _load_prepare_config(root, manifest, config_path)
         manifest["stage"] = "sharding"
         manifest["lock_owner"] = owner
+        manifest["prepare_progress"] = default_prepare_progress()
         save_manifest(layout, manifest)
         for shard in manifest.get("shards", {}).values():
             if shard.get("status") == "in_review" and is_stale(shard.get("heartbeat_at")):
                 shard["status"] = "pending"
                 shard["heartbeat_at"] = None
 
-        trace_summary = _enrich_findings_with_traces(layout, root, config)
+        trace_summary = _enrich_findings_with_traces(layout, root, config, manifest, owner)
 
         active, suppressed = _active_findings(layout)
+        progress = manifest.get("prepare_progress", default_prepare_progress())
+        progress["phase"] = "building_shards"
+        progress["current_finding_id"] = None
+        progress["current_file"] = None
+        progress["current_line"] = None
+        progress["active_findings_total"] = len(active)
+        _save_prepare_progress(layout, manifest, owner, progress)
         shards: list[list[dict[str, Any]]] = []
         current: list[dict[str, Any]] = []
         for finding in active:
@@ -433,8 +485,8 @@ def run_prepare_shards(*, root: Path, state_dir: Path, resume: bool, config_path
             manifest["shards_total"] = len(new_manifest_shards)
             manifest["shards_reviewed"] = len([item for item in new_manifest_shards.values() if item["status"] in {"reviewed", "merged"}])
             manifest["suppressed_findings"] = suppressed
-            touch_lock(layout, owner)
-            save_manifest(layout, manifest)
+            progress["shards_built"] = len(new_manifest_shards)
+            _save_prepare_progress(layout, manifest, owner, progress)
 
         for shard_path in layout.findings_dir.glob("*.jsonl"):
             if shard_path.stem not in active_shard_ids:
@@ -446,6 +498,13 @@ def run_prepare_shards(*, root: Path, state_dir: Path, resume: bool, config_path
         manifest["suppressed_findings"] = suppressed
         manifest["trace_summary"] = trace_summary
         manifest["stage"] = "sharded"
+        progress["phase"] = "completed"
+        progress["active_findings_total"] = len(active)
+        progress["shards_built"] = len(new_manifest_shards)
+        progress["current_finding_id"] = None
+        progress["current_file"] = None
+        progress["current_line"] = None
+        manifest["prepare_progress"] = progress
         save_manifest(layout, manifest)
         return {
             "shards_total": len(new_manifest_shards),
@@ -487,6 +546,24 @@ def _shard_payload(layout, shard_id: str) -> dict[str, Any]:
         "shard_path": shard_path.relative_to(layout.state_dir).as_posix(),
         "review_template_path": template_path.relative_to(layout.state_dir).as_posix(),
         "findings": payload_findings,
+    }
+
+
+def load_status_snapshot(*, root: Path, state_dir: Path) -> dict[str, Any]:
+    layout = build_layout(root, state_dir)
+    manifest = load_or_rebuild_manifest(layout)
+    prepare_progress = manifest.get("prepare_progress") or default_prepare_progress()
+    return {
+        "stage": manifest.get("stage"),
+        "updated_at": manifest.get("updated_at"),
+        "lock_owner": manifest.get("lock_owner"),
+        "files_total": int(manifest.get("files_total", 0)),
+        "files_done": int(manifest.get("files_done", 0)),
+        "shards_total": int(manifest.get("shards_total", 0)),
+        "shards_reviewed": int(manifest.get("shards_reviewed", 0)),
+        "suppressed_findings": int(manifest.get("suppressed_findings", 0)),
+        "trace_summary": manifest.get("trace_summary", {}),
+        "prepare_progress": prepare_progress,
     }
 
 

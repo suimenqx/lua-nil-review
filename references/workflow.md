@@ -7,6 +7,7 @@ See [architecture.md](architecture.md) first if you want the visual version of t
 The pipeline writes all durable state under `artifacts/string-find-nil/`.
 
 - `manifest.json`: run metadata, progress counters, shard statuses, and lock owner
+- `manifest.json -> prepare_progress`: real-time counters for trace enrichment and shard building
 - `files.jsonl`: one entry per Lua file with file hash, analysis status, and analysis artifact path
 - `analysis/<file_id>.json`: per-file findings and parse status
 - `symbol_index/files/<file_id>.json`: per-file symbol facts
@@ -20,6 +21,7 @@ The pipeline writes all durable state under `artifacts/string-find-nil/`.
 ## Entry Points
 
 - `scripts/run_review_cycle.py` is the highest-level wrapper and the preferred entry for CodeAgent.
+- The wrapper also exposes `status`, and `refresh/claim` accept `--progress` to stream manifest-backed progress updates to stderr.
 - The wrapper also exposes `build-symbol-index`, `jump`, and `trace` for collision-aware symbol navigation and bounded cross-function tracing.
 - `scripts/analyze_string_find_nil.py`, `scripts/prepare_review_shards.py`, `scripts/review_shard.py`, and `scripts/merge_review_results.py` remain available for manual phase control.
 - `CODEAGENT.md` is generated from a shared source by `python scripts/generate_adapter_docs.py`.
@@ -58,4 +60,5 @@ If the skill is installed at user scope instead, resolve the actual install path
 - Safe traces are auto-silenced and counted in `manifest.json -> trace_summary -> auto_silenced`.
 - `manifest.json -> trace_summary -> auto_filtered_low_confidence` is a legacy compatibility counter and should normally remain `0` under the evidence-based dismissal policy.
 - `manifest.json -> trace_summary` also records `agentic_retraced`, `agentic_improved`, `agentic_promoted_safe`, and `agentic_frontier_jumps`.
+- While `stage=sharding`, `manifest.json -> prepare_progress` tells you whether the workflow is still in `trace_enrichment` or has moved to `building_shards`. It is normal for `shards_total` to remain `0` until trace enrichment finishes.
 - `final/report.md` surfaces collision branch outcomes as `[path] -> status` lines so scenario-dependent results stay explicit.

@@ -179,13 +179,51 @@ python .codeagent/skills/lua-nil-review/scripts/run_review_cycle.py refresh
 - 可能真的没有问题。
 - 也可能是问题都被自动过滤了，比如 trace 或二次策略化 retrace 证明安全。
 
+### 如果仓库很大，想看实时进度
+
+你可以直接这样跑：
+
+```bash
+python .codeagent/skills/lua-nil-review/scripts/run_review_cycle.py refresh --progress
+```
+
+它会把阶段进度打印到 `stderr`，例如：
+
+- 正在分析第几个文件
+- 当前在做 `trace_enrichment` 还是 `building_shards`
+- 已处理多少 finding
+- 已补跑多少次 agentic retrace
+
+如果你不想重新跑命令，也可以单独看状态快照：
+
+```bash
+python .codeagent/skills/lua-nil-review/scripts/run_review_cycle.py status
+```
+
 这时可以去看：
 
 ```text
 artifacts/string-find-nil/manifest.json
 ```
 
-重点关注里面的 `trace_summary`。
+重点关注里面的：
+
+- `trace_summary`
+- `prepare_progress`
+
+### 为什么明明扫了很多文件，`shards_total` 还是 `0`
+
+这在大仓库里很常见，不一定是异常。
+
+原因是当前流程不是“边 trace 边切 shard”，而是：
+
+1. 先做 `analyze`
+2. 再做 `prepare -> trace_enrichment`
+3. trace 都结束后，才开始真正 `building_shards`
+
+所以在 `prepare_progress.phase = "trace_enrichment"` 时，就算已经扫了很多文件，`shards_total` 仍然可能是 `0`。
+
+只有等 trace enrichment 完成后，系统才会开始把剩余 finding 切成 shard。
 
 ## 7. 安装后，客户应该如何和 CodeAgent 交互
 
@@ -405,6 +443,8 @@ CodeAgent 会先确认：
   这里能看到自动 trace 的分支结果，以及二次策略化扩展留下的 `agentic_strategy`
 - `artifacts/string-find-nil/manifest.json`
   这里能看到 `trace_summary`，包括 `agentic_retraced` 这类统计
+- `python .codeagent/skills/lua-nil-review/scripts/run_review_cycle.py status`
+  这里能直接看到当前状态快照，不需要你手动翻完整个 `manifest.json`
 - `artifacts/string-find-nil/final/summary.json`
   这里能看到最终汇总
 

@@ -222,6 +222,56 @@ class PipelineTestCase(unittest.TestCase):
         self.assertFalse((REPO_ROOT / "GEMINI.md").exists())
         self.assertFalse((REPO_ROOT / "agents" / "openai.yaml").exists())
 
+    def test_status_command_reports_prepare_progress(self) -> None:
+        self.write_file(
+            "sample.lua",
+            "local function demo()\n"
+            "  local y = fetch_name()\n"
+            "  string.find(y, 'a')\n"
+            "end\n",
+        )
+        subprocess.run(
+            [
+                sys.executable,
+                str(REPO_ROOT / "scripts" / "run_review_cycle.py"),
+                "refresh",
+                "--root",
+                str(self.repo),
+                "--state-dir",
+                str(self.state_dir),
+            ],
+            cwd=REPO_ROOT,
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+        status = subprocess.run(
+            [
+                sys.executable,
+                str(REPO_ROOT / "scripts" / "run_review_cycle.py"),
+                "status",
+                "--root",
+                str(self.repo),
+                "--state-dir",
+                str(self.state_dir),
+            ],
+            cwd=REPO_ROOT,
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+        payload = json.loads(status.stdout)["status"]
+        self.assertEqual("sharded", payload["stage"])
+        self.assertEqual(1, payload["files_done"])
+        self.assertEqual(1, payload["files_total"])
+        self.assertEqual(1, payload["shards_total"])
+        progress = payload["prepare_progress"]
+        self.assertEqual("completed", progress["phase"])
+        self.assertEqual(1, progress["findings_total"])
+        self.assertEqual(1, progress["findings_done"])
+        self.assertEqual(1, progress["trace_candidates_total"])
+        self.assertEqual(1, progress["trace_candidates_done"])
+
     def test_wrapper_claim_and_complete_flow(self) -> None:
         self.write_file("sample.lua", "local function demo()\n  local y = nil\n  string.find(y, 'a')\nend\n")
         claim = subprocess.run(

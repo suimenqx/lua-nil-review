@@ -24,6 +24,27 @@ from .common import (
 )
 
 
+def default_prepare_progress() -> dict[str, Any]:
+    return {
+        "phase": "idle",
+        "findings_total": 0,
+        "findings_done": 0,
+        "trace_candidates_total": 0,
+        "trace_candidates_done": 0,
+        "visible_after_trace": 0,
+        "auto_silenced": 0,
+        "agentic_retraced": 0,
+        "agentic_improved": 0,
+        "agentic_promoted_safe": 0,
+        "agentic_frontier_jumps": 0,
+        "current_finding_id": None,
+        "current_file": None,
+        "current_line": None,
+        "active_findings_total": 0,
+        "shards_built": 0,
+    }
+
+
 @dataclass(frozen=True)
 class StateLayout:
     root: Path
@@ -85,6 +106,7 @@ def default_manifest(layout: StateLayout) -> dict[str, Any]:
         "shards_reviewed": 0,
         "suppressed_findings": 0,
         "trace_summary": {},
+        "prepare_progress": default_prepare_progress(),
         "updated_at": utc_now(),
         "lock_owner": "",
         "shards": {},
@@ -125,6 +147,7 @@ def load_or_rebuild_manifest(layout: StateLayout) -> dict[str, Any]:
     manifest.setdefault("report_template_version", REPORT_TEMPLATE_VERSION)
     manifest.setdefault("symbol_fingerprint", "")
     manifest.setdefault("trace_summary", {})
+    manifest.setdefault("prepare_progress", default_prepare_progress())
     return manifest
 
 

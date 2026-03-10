@@ -6,7 +6,7 @@ from pathlib import Path
 
 from .symbol_query import jump_to_definition
 from .tracer import trace_finding
-from .workflow import claim_next_shard, complete_shard, heartbeat_shard, run_analyze, run_merge, run_prepare_shards
+from .workflow import claim_next_shard, complete_shard, heartbeat_shard, load_status_snapshot, run_analyze, run_merge, run_prepare_shards
 
 
 def analyze_main(argv: list[str] | None = None) -> int:
@@ -64,6 +64,16 @@ def merge_main(argv: list[str] | None = None) -> int:
     parser.add_argument("--resume", action="store_true")
     args = parser.parse_args(argv)
     result = run_merge(root=Path(args.root).resolve(), state_dir=Path(args.state_dir), config_path=args.config)
+    print(json.dumps(result, ensure_ascii=False, indent=2))
+    return 0
+
+
+def status_main(argv: list[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(description="Show the current persisted workflow status.")
+    parser.add_argument("--state-dir", default="artifacts/string-find-nil")
+    parser.add_argument("--root", default=".")
+    args = parser.parse_args(argv)
+    result = load_status_snapshot(root=Path(args.root).resolve(), state_dir=Path(args.state_dir))
     print(json.dumps(result, ensure_ascii=False, indent=2))
     return 0
 

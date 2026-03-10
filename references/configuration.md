@@ -72,7 +72,9 @@ Evidence-based dismissal is the current default:
 Use the wrapper when an agent wants a single command entry point. With a workspace-scoped CodeAgent skill install, the wrapper path is usually `.codeagent/skills/lua-nil-review/scripts/run_review_cycle.py`.
 
 ```bash
+python .codeagent/skills/lua-nil-review/scripts/run_review_cycle.py refresh --progress
 python .codeagent/skills/lua-nil-review/scripts/run_review_cycle.py claim
+python .codeagent/skills/lua-nil-review/scripts/run_review_cycle.py status
 python .codeagent/skills/lua-nil-review/scripts/run_review_cycle.py complete --review-json review.json
 python .codeagent/skills/lua-nil-review/scripts/run_review_cycle.py build-symbol-index
 python .codeagent/skills/lua-nil-review/scripts/run_review_cycle.py jump --file foo.lua --line 88 --expr Config.get
@@ -126,3 +128,4 @@ Valid decisions for MVP are `confirm`, `dismiss`, and `needs_source_escalation`.
 - `trace_bundles/callsite-*.json` stores direct callsite trace output triggered via `trace --file/--line/--expr`.
 - `symbol_index/` stores per-file symbol facts and aggregated module collision data.
 - `symbol_slices/` stores cached function logic slices used by jump and trace payloads.
+- `manifest.json -> prepare_progress` stores live counters for `trace_enrichment` and `building_shards`.

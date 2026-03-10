@@ -38,6 +38,7 @@ flowchart LR
 ### How to read this
 
 - `scripts/run_review_cycle.py` is the shortest path for agents and humans. It stitches `analyze -> prepare -> claim` or `complete -> merge`.
+- The same wrapper also exposes `status`, and `refresh/claim --progress` stream manifest-backed progress for large repositories.
 - The lower-level `scripts/*.py` files are thin entrypoints for manual phase control. They all end up in `lua_nil_review.workflow`.
 - `workflow.py` is the real state machine. It decides when to reuse old analysis, shard findings, reclaim stale review work, and merge outputs.
 - `analyzer.py` is intentionally narrow: it parses Lua, tracks local nil-state, records evidence, and emits short snippets instead of forcing full-file review.
@@ -130,6 +131,7 @@ flowchart TD
 ### Why the artifact layout matters
 
 - `manifest.json` is the control tower. It tracks stage, counters, and shard ownership.
+- `manifest.json -> prepare_progress` is the live sub-structure to watch when `shards_total` is still `0` during a large run.
 - `files.jsonl` is the incremental cache index. It tells the analyzer which file results can be reused.
 - `analysis/` is the durable machine output for each Lua file.
 - `findings/` contains only active review work, which keeps the reviewer's working set small.
