@@ -14,6 +14,7 @@ Use this repository as the source for a persisted Lua nil-risk review skill on C
 ## Notes
 
 - For real use on another repository, prefer `codeagent skills link <repo> --scope workspace` or `codeagent skills install <repo> --scope workspace`, then call the installed wrapper from `.codeagent/skills/lua-nil-review/scripts/`.
+- Start with `references/codeagent_getting_started.md` if you are new and want a step-by-step setup guide.
 - Read `references/architecture.md` for visual diagrams of the runtime layers, persisted artifacts, and adapter surfaces.
 - `CODEAGENT.md` is the only generated adapter document shipped by this alias build.
 

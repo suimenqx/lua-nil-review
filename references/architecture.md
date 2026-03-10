@@ -151,7 +151,8 @@ flowchart TD
 
 ## Recommended Reading Order
 
-1. Start here for the pictures and terminology.
-2. Read [workflow.md](workflow.md) for the persisted state rules.
-3. Read [configuration.md](configuration.md) for config keys, wrapper usage, and review JSON shape.
-4. Open `workflow.py` and `analyzer.py` if you need implementation detail.
+1. Start with [codeagent_getting_started.md](codeagent_getting_started.md) if you are new and want the shortest path to a working setup.
+2. Read this file for the pictures and terminology.
+3. Read [workflow.md](workflow.md) for the persisted state rules.
+4. Read [configuration.md](configuration.md) for config keys, wrapper usage, and review JSON shape.
+5. Open `workflow.py` and `analyzer.py` if you need implementation detail.

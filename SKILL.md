@@ -41,6 +41,7 @@ If that path does not exist, resolve the installed skill location with `codeagen
 
 ## References
 
+- Start with [references/codeagent_getting_started.md](references/codeagent_getting_started.md) if you want a beginner-friendly install and usage guide.
 - Read [references/architecture.md](references/architecture.md) for visual diagrams of the runtime layers, persisted artifacts, and adapter surfaces.
 - Read [references/workflow.md](references/workflow.md) for the persisted state machine, install mode, trace gating, and resume behavior.
 - Read [references/configuration.md](references/configuration.md) for config keys, wrapper usage, review JSON shape, and output files.
