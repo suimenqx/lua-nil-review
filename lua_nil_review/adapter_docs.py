@@ -70,6 +70,7 @@ def render_adapter_doc(adapter: AdapterDoc) -> str:
             "## Notes",
             "",
             f"- {adapter.extra_note}",
+            "- Normal use is conversational: ask CodeAgent to use `lua-nil-review` on the current repository, refresh findings, claim a shard, and deepen review with `jump` or `trace` when needed.",
             "- Start with `references/codeagent_getting_started.md` if you are new and want a step-by-step setup guide.",
             "- Read `references/architecture.md` for visual diagrams of the runtime layers, persisted artifacts, and adapter surfaces.",
             "- `CODEAGENT.md` is the only generated adapter document shipped by this alias build.",

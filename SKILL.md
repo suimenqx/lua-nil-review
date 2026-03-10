@@ -20,10 +20,11 @@ If that path does not exist, resolve the installed skill location with `codeagen
 ## Workflow
 
 1. Resolve the wrapper path. Prefer `python .codeagent/skills/lua-nil-review/scripts/run_review_cycle.py`.
-2. Use the shortest operator path when possible: `<wrapper> claim`
-3. Review only the claimed shard and its snippets. Do not open the whole repository or full giant files unless a finding explicitly needs source escalation.
-4. Write a review JSON with `shard_id`, `summary`, and `finding_reviews`, then complete it with `<wrapper> complete --review-json <review.json>`
-5. Use the lower-level scripts only when you need to split phases manually:
+2. In normal use, let the user talk to CodeAgent in natural language, for example asking it to refresh the current repository, claim a shard, and deepen review with `jump` or `trace` when needed.
+3. Use the shortest operator path when possible: `<wrapper> claim`
+4. Review only the claimed shard and its snippets. Do not open the whole repository or full giant files unless a finding explicitly needs source escalation.
+5. Write a review JSON with `shard_id`, `summary`, and `finding_reviews`, then complete it with `<wrapper> complete --review-json <review.json>`
+6. Use the lower-level scripts only when you need to split phases manually:
    - `python <skill-script-dir>/analyze_string_find_nil.py --resume`
    - `python <skill-script-dir>/prepare_review_shards.py --resume`
    - `python <skill-script-dir>/review_shard.py --claim-next`
