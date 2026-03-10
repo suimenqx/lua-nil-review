@@ -1,5 +1,0 @@
-interface:
-  display_name: "Lua Nil Review"
-  short_description: "Incremental nil-risk review for very large Lua codebases"
-  default_prompt: "Analyze a large Lua repository for nil risks, starting with string.find first-argument nil issues, using the persisted workflow and review shards."
-

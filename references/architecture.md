@@ -47,23 +47,20 @@ flowchart LR
 
 ```mermaid
 flowchart LR
-    Skill["SKILL.md<br/>canonical skill entrypoint"] --> Users["Developers, Gemini, Codex, Claude"]
+    Skill["SKILL.md<br/>canonical skill entrypoint"] --> Users["Developers and CodeAgent"]
 
     AdapterSource["lua_nil_review/adapter_docs.py<br/>shared adapter content"] --> Generator["scripts/generate_adapter_docs.py"]
-    Generator --> Generated["AGENTS.md<br/>CLAUDE.md<br/>GEMINI.md"]
+    Generator --> Generated["CODEAGENT.md"]
     Generated --> Users
 
-    Metadata["agents/openai.yaml<br/>Codex UI metadata only"] -. metadata .-> Users
-
-    Users --> Install["Workspace install or link<br/>.gemini/skills/lua-nil-review/<br/>.agents/skills/lua-nil-review/"]
+    Users --> Install["Workspace install or link<br/>.codeagent/skills/lua-nil-review/"]
     Install --> WrapperPath["scripts/run_review_cycle.py"]
 ```
 
 ### What this means
 
 - `SKILL.md` is the repo-native explanation of the capability and workflow.
-- `AGENTS.md`, `CLAUDE.md`, and `GEMINI.md` are generated adapter docs, not hand-maintained copies.
-- `agents/openai.yaml` is metadata for the OpenAI/Codex UI. It is not part of the review pipeline itself.
+- `CODEAGENT.md` is the generated adapter doc, not a hand-maintained copy.
 - The same runtime scripts are reused whether the skill is linked into another workspace or run from this repository directly.
 
 ## 3. Review Cycle

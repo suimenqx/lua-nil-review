@@ -51,15 +51,29 @@ By default, only Levels `1` and `2` are human-visible before trace filtering. Le
 
 ## Shortest CLI Usage
 
-Use the wrapper when an agent wants a single command entry point. With a workspace-scoped Gemini skill install, the wrapper path is usually `.gemini/skills/lua-nil-review/scripts/run_review_cycle.py` or `.agents/skills/lua-nil-review/scripts/run_review_cycle.py`.
+Use the wrapper when an agent wants a single command entry point. With a workspace-scoped CodeAgent skill install, the wrapper path is usually `.codeagent/skills/lua-nil-review/scripts/run_review_cycle.py`.
 
 ```bash
-python .gemini/skills/lua-nil-review/scripts/run_review_cycle.py claim
-python .gemini/skills/lua-nil-review/scripts/run_review_cycle.py complete --review-json review.json
-python .gemini/skills/lua-nil-review/scripts/run_review_cycle.py build-symbol-index
-python .gemini/skills/lua-nil-review/scripts/run_review_cycle.py jump --file foo.lua --line 88 --expr Config.get
-python .gemini/skills/lua-nil-review/scripts/run_review_cycle.py trace --finding-id <finding_id>
-python .gemini/skills/lua-nil-review/scripts/run_review_cycle.py trace --file foo.lua --line 88 --expr Config.get
+python .codeagent/skills/lua-nil-review/scripts/run_review_cycle.py claim
+python .codeagent/skills/lua-nil-review/scripts/run_review_cycle.py complete --review-json review.json
+python .codeagent/skills/lua-nil-review/scripts/run_review_cycle.py build-symbol-index
+python .codeagent/skills/lua-nil-review/scripts/run_review_cycle.py jump --file foo.lua --line 88 --expr Config.get
+python .codeagent/skills/lua-nil-review/scripts/run_review_cycle.py trace --finding-id <finding_id>
+python .codeagent/skills/lua-nil-review/scripts/run_review_cycle.py trace --file foo.lua --line 88 --expr Config.get
+```
+
+For direct repository use without skill installation:
+
+```bash
+python scripts/run_review_cycle.py refresh --root /path/to/repo --state-dir artifacts/string-find-nil
+```
+
+## Dependencies
+
+Install the pinned parser dependency before the first run:
+
+```bash
+python -m pip install -r requirements.txt
 ```
 
 ## Review JSON
@@ -69,7 +83,7 @@ python .gemini/skills/lua-nil-review/scripts/run_review_cycle.py trace --file fo
 ```json
 {
   "shard_id": "abc123",
-  "reviewer": "codex",
+  "reviewer": "codeagent",
   "summary": "Short shard summary.",
   "finding_reviews": [
     {
@@ -89,6 +103,7 @@ Valid decisions for MVP are `confirm`, `dismiss`, and `needs_source_escalation`.
 - `final/summary.json` contains counts plus confirmed and escalated findings.
 - `final/report.md` is the human-readable review output.
 - `suppressed` findings stay in per-file analysis artifacts but do not become review shards.
+- `analysis/<file_id>.json` stores `risk_level`, `risk_tier`, `human_review_visible`, and trace gating fields for each finding.
 - `trace_bundles/<finding_id>.json` stores bounded cross-function trace output for active findings.
 - `trace_bundles/callsite-*.json` stores direct callsite trace output triggered via `trace --file/--line/--expr`.
 - `symbol_index/` stores per-file symbol facts and aggregated module collision data.

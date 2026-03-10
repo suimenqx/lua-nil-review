@@ -8,12 +8,12 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from lua_nil_review.adapter_docs import generated_files
+from lua_nil_review.adapter_docs import generated_files, legacy_files
 from lua_nil_review.common import atomic_write_text
 
 
 def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(description="Generate AGENTS.md, CLAUDE.md, and GEMINI.md from one shared source.")
+    parser = argparse.ArgumentParser(description="Generate CODEAGENT.md from one shared source and remove legacy adapter docs.")
     parser.add_argument("--check", action="store_true", help="Exit non-zero if generated files are out of date.")
     args = parser.parse_args(argv)
 
@@ -24,6 +24,12 @@ def main(argv: list[str] | None = None) -> int:
             stale.append(path)
             if not args.check:
                 atomic_write_text(path, content)
+
+    for path in legacy_files(ROOT):
+        if path.exists():
+            stale.append(path)
+            if not args.check:
+                path.unlink()
 
     if args.check:
         if stale:
@@ -43,4 +49,3 @@ def main(argv: list[str] | None = None) -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
-

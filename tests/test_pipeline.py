@@ -216,6 +216,11 @@ class PipelineTestCase(unittest.TestCase):
         )
         self.assertEqual(0, result.returncode, msg=result.stdout + result.stderr)
         self.assertIn("adapter docs are up to date", result.stdout)
+        self.assertTrue((REPO_ROOT / "CODEAGENT.md").exists())
+        self.assertFalse((REPO_ROOT / "AGENTS.md").exists())
+        self.assertFalse((REPO_ROOT / "CLAUDE.md").exists())
+        self.assertFalse((REPO_ROOT / "GEMINI.md").exists())
+        self.assertFalse((REPO_ROOT / "agents" / "openai.yaml").exists())
 
     def test_wrapper_claim_and_complete_flow(self) -> None:
         self.write_file("sample.lua", "local function demo()\n  local y = nil\n  string.find(y, 'a')\nend\n")

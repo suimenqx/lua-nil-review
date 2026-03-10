@@ -19,20 +19,18 @@ The pipeline writes all durable state under `artifacts/string-find-nil/`.
 
 ## Entry Points
 
-- `scripts/run_review_cycle.py` is the highest-level wrapper and the preferred entry for Gemini CLI.
+- `scripts/run_review_cycle.py` is the highest-level wrapper and the preferred entry for CodeAgent.
 - The wrapper also exposes `build-symbol-index`, `jump`, and `trace` for collision-aware symbol navigation and bounded cross-function tracing.
 - `scripts/analyze_string_find_nil.py`, `scripts/prepare_review_shards.py`, `scripts/review_shard.py`, and `scripts/merge_review_results.py` remain available for manual phase control.
-- `AGENTS.md`, `CLAUDE.md`, and `GEMINI.md` are generated from a shared source by `python scripts/generate_adapter_docs.py`.
-- `agents/openai.yaml` is OpenAI/Codex UI metadata. It is not a Gemini or Claude adapter file.
+- `CODEAGENT.md` is generated from a shared source by `python scripts/generate_adapter_docs.py`.
 
-## Gemini Skill Install
+## CodeAgent Skill Install
 
-Prefer `gemini skills link <repo> --scope workspace` or `gemini skills install <repo> --scope workspace` for this skill. Workspace scope keeps the skill scripts at predictable paths inside the target repository:
+Prefer `codeagent skills link <repo> --scope workspace` or `codeagent skills install <repo> --scope workspace` for this skill. Workspace scope keeps the skill scripts at a predictable path inside the target repository:
 
-- `.gemini/skills/lua-nil-review/`
-- `.agents/skills/lua-nil-review/`
+- `.codeagent/skills/lua-nil-review/`
 
-If the skill is installed at user scope instead, resolve the actual install path with `gemini skills list --all` before invoking the bundled scripts.
+If the skill is installed at user scope instead, resolve the actual install path with `codeagent skills list --all` before invoking the bundled scripts.
 
 ## Resume Rules
 
