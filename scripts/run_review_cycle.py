@@ -31,6 +31,27 @@ def _format_progress_line(status: dict[str, object]) -> str:
     files_done = int(status.get("files_done") or 0)
     files_total = int(status.get("files_total") or 0)
     if stage == "analyzing":
+        analyze = status.get("analyze_progress")
+        if isinstance(analyze, dict):
+            analyzed = int(analyze.get("analyzed_files") or 0)
+            reused = int(analyze.get("reused_files") or 0)
+            findings = int(analyze.get("findings_discovered") or 0)
+            files_with_findings = int(analyze.get("files_with_findings") or 0)
+            parse_errors = int(analyze.get("parse_errors") or 0)
+            current_file = analyze.get("current_file")
+            current_status = analyze.get("current_status")
+            current = f" current={current_file}({current_status})" if current_file and current_status else ""
+            latest = ""
+            recent = analyze.get("recent_findings")
+            if isinstance(recent, list) and recent:
+                last = recent[-1]
+                if isinstance(last, dict):
+                    latest = f" latest={last.get('file')}:{last.get('line')}"
+            return (
+                f"[lua-nil-review] stage=analyzing files={files_done}/{files_total} "
+                f"analyzed={analyzed} reused={reused} findings={findings} "
+                f"hit_files={files_with_findings} parse_errors={parse_errors}{current}{latest}"
+            )
         return f"[lua-nil-review] stage=analyzing files={files_done}/{files_total}"
     prepare = status.get("prepare_progress")
     if isinstance(prepare, dict):
@@ -45,12 +66,35 @@ def _format_progress_line(status: dict[str, object]) -> str:
             current_file = prepare.get("current_file")
             current_line = prepare.get("current_line")
             current = f" current={current_file}:{current_line}" if current_file and current_line else ""
+            current_summary = prepare.get("current_candidate_summary")
+            summary_suffix = ""
+            if isinstance(current_summary, str) and current_summary:
+                compact = current_summary.strip()
+                if len(compact) > 84:
+                    compact = compact[:81] + "..."
+                summary_suffix = f" note={compact}"
+            trace_summary = status.get("trace_summary")
+            live = ""
+            if isinstance(trace_summary, dict) and trace_summary:
+                traced = int(trace_summary.get("traced") or 0)
+                silenced = int(trace_summary.get("auto_silenced") or 0)
+                live = f" traced={traced} safe={silenced}"
             return (
                 f"[lua-nil-review] stage={stage} phase={phase} "
                 f"findings={findings_done}/{findings_total} traces={trace_done}/{trace_total} "
-                f"visible={visible} shards={shards_built}{current}"
+                f"visible={visible} shards={shards_built}{live}{current}{summary_suffix}"
             )
     if stage == "sharded":
+        overview = status.get("candidate_overview")
+        if isinstance(overview, dict) and overview:
+            visible = int(overview.get("visible_findings") or 0)
+            uncertain = int(overview.get("uncertain_findings") or 0)
+            top_paths = overview.get("top_candidate_paths") or []
+            top_hint = f" top={top_paths[0]}" if isinstance(top_paths, list) and top_paths else ""
+            return (
+                f"[lua-nil-review] stage=sharded shards={int(status.get('shards_total') or 0)} "
+                f"visible={visible} uncertain={uncertain}{top_hint}"
+            )
         return f"[lua-nil-review] stage=sharded shards={int(status.get('shards_total') or 0)}"
     if stage == "reviewing":
         return f"[lua-nil-review] stage=reviewing shards={int(status.get('shards_total') or 0)} reviewed={int(status.get('shards_reviewed') or 0)}"

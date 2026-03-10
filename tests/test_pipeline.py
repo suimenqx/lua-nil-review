@@ -299,6 +299,51 @@ class PipelineTestCase(unittest.TestCase):
         self.assertEqual(1, progress["findings_done"])
         self.assertEqual(1, progress["trace_candidates_total"])
         self.assertEqual(1, progress["trace_candidates_done"])
+        analyze = payload["analyze_progress"]
+        self.assertEqual("completed", analyze["phase"])
+        self.assertEqual(1, analyze["findings_discovered"])
+        self.assertEqual(1, analyze["files_with_findings"])
+        self.assertGreaterEqual(len(analyze["recent_findings"]), 1)
+        self.assertEqual("sample.lua", analyze["recent_findings"][-1]["file"])
+
+    def test_status_command_reports_analyze_feedback_after_analyze_only(self) -> None:
+        self.write_file(
+            "sample.lua",
+            "local function demo()\n"
+            "  local y = nil\n"
+            "  string.find(y, 'a')\n"
+            "end\n",
+        )
+        self.write_file("broken.lua", "local function bad(\n")
+        self.analyze()
+
+        status = subprocess.run(
+            [
+                sys.executable,
+                str(REPO_ROOT / "scripts" / "run_review_cycle.py"),
+                "status",
+                "--root",
+                str(self.repo),
+                "--state-dir",
+                str(self.state_dir),
+            ],
+            cwd=REPO_ROOT,
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+        payload = json.loads(status.stdout)["status"]
+        self.assertEqual("analyzed", payload["stage"])
+        analyze = payload["analyze_progress"]
+        self.assertEqual("completed", analyze["phase"])
+        self.assertEqual(2, analyze["files_total"])
+        self.assertEqual(2, analyze["files_done"])
+        self.assertEqual(2, analyze["analyzed_files"])
+        self.assertEqual(1, analyze["findings_discovered"])
+        self.assertEqual(1, analyze["files_with_findings"])
+        self.assertEqual(1, analyze["parse_errors"])
+        self.assertGreaterEqual(len(analyze["recent_findings"]), 1)
+        self.assertEqual("sample.lua", analyze["recent_findings"][-1]["file"])
 
     def test_wrapper_claim_and_complete_flow(self) -> None:
         self.write_file("sample.lua", "local function demo()\n  local y = nil\n  string.find(y, 'a')\nend\n")

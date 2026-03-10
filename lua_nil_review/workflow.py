@@ -31,6 +31,7 @@ from .parsed_lua import parse_lua_file
 from .state import (
     acquire_lock,
     build_layout,
+    default_analyze_progress,
     default_prepare_progress,
     load_files_index,
     load_or_rebuild_manifest,
@@ -52,6 +53,26 @@ def analysis_fingerprint(config: ReviewConfig) -> str:
 
 def symbol_fingerprint(config: ReviewConfig) -> str:
     return sha256_hex("|".join([SYMBOL_INDEX_VERSION, PARSER_VERSION, config.fingerprint()]))
+
+
+def _finding_preview_item(finding: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "finding_id": finding.get("finding_id"),
+        "file": finding.get("file"),
+        "line": finding.get("line"),
+        "message": finding.get("message"),
+        "risk_level": finding.get("risk_level"),
+        "risk_tier": finding.get("risk_tier"),
+        "risk_category": finding.get("risk_category"),
+        "nil_state": finding.get("nil_state"),
+    }
+
+
+def _extend_recent_findings(progress: dict[str, Any], findings: list[dict[str, Any]], *, limit: int = 5) -> None:
+    recent = list(progress.get("recent_findings", []))
+    for finding in findings[:2]:
+        recent.append(_finding_preview_item(finding))
+    progress["recent_findings"] = recent[-limit:]
 
 
 def discover_lua_files(root: Path, config: ReviewConfig, state_dir: Path) -> list[Path]:
@@ -90,6 +111,8 @@ def run_analyze(*, root: Path, config_path: str | None, state_dir: Path, resume:
         manifest["config_path"] = str(loaded_config_path.resolve()) if loaded_config_path else None
         manifest["stage"] = "analyzing"
         manifest["lock_owner"] = owner
+        manifest["trace_summary"] = {}
+        manifest["analyze_progress"] = default_analyze_progress()
         manifest["prepare_progress"] = default_prepare_progress()
         manifest["candidate_overview"] = {}
         manifest["finding_preview"] = []
@@ -101,6 +124,11 @@ def run_analyze(*, root: Path, config_path: str | None, state_dir: Path, resume:
         current_ids = set()
         manifest["files_total"] = len(current_paths)
         manifest["files_done"] = 0
+        analyze_progress = default_analyze_progress()
+        analyze_progress["phase"] = "scanning_files"
+        analyze_progress["files_total"] = len(current_paths)
+        manifest["analyze_progress"] = analyze_progress
+        save_manifest(layout, manifest)
 
         for index, path in enumerate(current_paths, start=1):
             relative = rel_posix(path, root)
@@ -130,6 +158,7 @@ def run_analyze(*, root: Path, config_path: str | None, state_dir: Path, resume:
                 parse_status = analysis_doc.get("parse_status", "ok")
                 parse_error = analysis_doc.get("parse_error")
                 symbol_parse_status = symbol_doc.parse_status if symbol_doc is not None else "error"
+                findings_doc = list(analysis_doc.get("findings", []))
             else:
                 decoded = content.decode("utf-8", errors="replace")
                 parsed = None
@@ -165,6 +194,7 @@ def run_analyze(*, root: Path, config_path: str | None, state_dir: Path, resume:
                 parse_status = result.parse_status
                 parse_error = result.parse_error
                 symbol_parse_status = symbol_doc.parse_status
+                findings_doc = list(result.findings)
             if symbol_doc is None:
                 symbol_doc = extract_file_symbols(
                     relative,
@@ -197,6 +227,22 @@ def run_analyze(*, root: Path, config_path: str | None, state_dir: Path, resume:
             symbol_docs.append(symbol_doc)
             save_files_index(layout, entries)
             manifest["files_done"] = index
+            analyze_progress["files_done"] = index
+            analyze_progress["current_file"] = relative
+            analyze_progress["current_status"] = analysis_status
+            analyze_progress["current_findings_in_file"] = finding_count
+            if analysis_status == "reused":
+                analyze_progress["reused_files"] = int(analyze_progress.get("reused_files", 0)) + 1
+            else:
+                analyze_progress["analyzed_files"] = int(analyze_progress.get("analyzed_files", 0)) + 1
+            if finding_count:
+                analyze_progress["files_with_findings"] = int(analyze_progress.get("files_with_findings", 0)) + 1
+                analyze_progress["findings_discovered"] = int(analyze_progress.get("findings_discovered", 0)) + finding_count
+                analyze_progress["suppressed_findings"] = int(analyze_progress.get("suppressed_findings", 0)) + suppressed_findings
+                _extend_recent_findings(analyze_progress, findings_doc)
+            if parse_status != "ok":
+                analyze_progress["parse_errors"] = int(analyze_progress.get("parse_errors", 0)) + 1
+            manifest["analyze_progress"] = analyze_progress
             touch_lock(layout, owner)
             save_manifest(layout, manifest)
 
@@ -215,6 +261,13 @@ def run_analyze(*, root: Path, config_path: str | None, state_dir: Path, resume:
         manifest["files_total"] = len(entries)
         manifest["files_done"] = len(entries)
         manifest["symbol_index"] = symbol_summary
+        analyze_progress["phase"] = "completed"
+        analyze_progress["files_total"] = len(entries)
+        analyze_progress["files_done"] = len(entries)
+        analyze_progress["current_file"] = None
+        analyze_progress["current_status"] = None
+        analyze_progress["current_findings_in_file"] = 0
+        manifest["analyze_progress"] = analyze_progress
         save_files_index(layout, entries)
         save_manifest(layout, manifest)
         return {
@@ -485,6 +538,34 @@ def _candidate_overview(findings: list[dict[str, Any]], trace_summary: dict[str,
     }
 
 
+def _running_trace_summary(
+    *,
+    traced: int,
+    silenced: int,
+    escalated: int,
+    visible_after_trace: int,
+    risk_counts: dict[int, int],
+    agentic_retraced: int,
+    agentic_improved: int,
+    agentic_promoted_safe: int,
+    agentic_frontier_jumps: int,
+) -> dict[str, int]:
+    return {
+        "traced": traced,
+        "auto_silenced": silenced,
+        "auto_filtered_low_confidence": 0,
+        "escalated": escalated,
+        "visible_after_trace": visible_after_trace,
+        "level_1": risk_counts[1],
+        "level_2": risk_counts[2],
+        "level_3": risk_counts[3],
+        "agentic_retraced": agentic_retraced,
+        "agentic_improved": agentic_improved,
+        "agentic_promoted_safe": agentic_promoted_safe,
+        "agentic_frontier_jumps": agentic_frontier_jumps,
+    }
+
+
 def _enrich_findings_with_traces(layout, root: Path, config: ReviewConfig, manifest: dict[str, Any], owner: str) -> dict[str, int]:
     if not config.symbol_tracing.enabled:
         return {"traced": 0, "auto_silenced": 0, "auto_filtered_low_confidence": 0, "escalated": 0, "visible_after_trace": 0, "level_1": 0, "level_2": 0, "level_3": 0, "agentic_retraced": 0, "agentic_improved": 0, "agentic_promoted_safe": 0, "agentic_frontier_jumps": 0}
@@ -504,6 +585,7 @@ def _enrich_findings_with_traces(layout, root: Path, config: ReviewConfig, manif
     agentic_frontier_jumps = 0
     risk_counts = {1: 0, 2: 0, 3: 0}
     active_finding_ids: set[str] = set()
+    visible_preview: list[dict[str, Any]] = []
     for analysis_path in sorted(layout.analysis_dir.glob("*.json")):
         analysis_doc = load_json(analysis_path, default={})
         changed = False
@@ -541,6 +623,20 @@ def _enrich_findings_with_traces(layout, root: Path, config: ReviewConfig, manif
                 progress["findings_done"] += 1
                 progress["visible_after_trace"] = visible_after_trace
                 progress["auto_silenced"] = silenced
+                visible_preview.append(finding)
+                manifest["trace_summary"] = _running_trace_summary(
+                    traced=traced,
+                    silenced=silenced,
+                    escalated=escalated,
+                    visible_after_trace=visible_after_trace,
+                    risk_counts=risk_counts,
+                    agentic_retraced=agentic_retraced,
+                    agentic_improved=agentic_improved,
+                    agentic_promoted_safe=agentic_promoted_safe,
+                    agentic_frontier_jumps=agentic_frontier_jumps,
+                )
+                manifest["candidate_overview"] = _candidate_overview(visible_preview, manifest["trace_summary"])
+                manifest["finding_preview"] = _finding_preview_entries(visible_preview)
                 _save_prepare_progress(layout, manifest, owner, progress)
                 continue
             bundle = _trace_finding_with_strategy(root=root, layout=layout, config=config, finding=finding)
@@ -608,6 +704,21 @@ def _enrich_findings_with_traces(layout, root: Path, config: ReviewConfig, manif
             progress["agentic_promoted_safe"] = agentic_promoted_safe
             progress["agentic_frontier_jumps"] = agentic_frontier_jumps
             progress["current_candidate_summary"] = finding.get("candidate_summary")
+            if finding["human_review_visible"]:
+                visible_preview.append(finding)
+            manifest["trace_summary"] = _running_trace_summary(
+                traced=traced,
+                silenced=silenced,
+                escalated=escalated,
+                visible_after_trace=visible_after_trace,
+                risk_counts=risk_counts,
+                agentic_retraced=agentic_retraced,
+                agentic_improved=agentic_improved,
+                agentic_promoted_safe=agentic_promoted_safe,
+                agentic_frontier_jumps=agentic_frontier_jumps,
+            )
+            manifest["candidate_overview"] = _candidate_overview(visible_preview, manifest["trace_summary"])
+            manifest["finding_preview"] = _finding_preview_entries(visible_preview)
             _save_prepare_progress(layout, manifest, owner, progress)
             changed = True
         if changed:
@@ -616,20 +727,17 @@ def _enrich_findings_with_traces(layout, root: Path, config: ReviewConfig, manif
         if bundle_path.stem in active_finding_ids or bundle_path.stem.startswith("callsite-"):
             continue
         bundle_path.unlink(missing_ok=True)
-    return {
-        "traced": traced,
-        "auto_silenced": silenced,
-        "auto_filtered_low_confidence": 0,
-        "escalated": escalated,
-        "visible_after_trace": visible_after_trace,
-        "level_1": risk_counts[1],
-        "level_2": risk_counts[2],
-        "level_3": risk_counts[3],
-        "agentic_retraced": agentic_retraced,
-        "agentic_improved": agentic_improved,
-        "agentic_promoted_safe": agentic_promoted_safe,
-        "agentic_frontier_jumps": agentic_frontier_jumps,
-    }
+    return _running_trace_summary(
+        traced=traced,
+        silenced=silenced,
+        escalated=escalated,
+        visible_after_trace=visible_after_trace,
+        risk_counts=risk_counts,
+        agentic_retraced=agentic_retraced,
+        agentic_improved=agentic_improved,
+        agentic_promoted_safe=agentic_promoted_safe,
+        agentic_frontier_jumps=agentic_frontier_jumps,
+    )
 
 
 def run_prepare_shards(*, root: Path, state_dir: Path, resume: bool, config_path: str | None = None) -> dict[str, Any]:
@@ -640,7 +748,10 @@ def run_prepare_shards(*, root: Path, state_dir: Path, resume: bool, config_path
         config = _load_prepare_config(root, manifest, config_path)
         manifest["stage"] = "sharding"
         manifest["lock_owner"] = owner
+        manifest["trace_summary"] = {}
         manifest["prepare_progress"] = default_prepare_progress()
+        manifest["candidate_overview"] = {}
+        manifest["finding_preview"] = []
         save_manifest(layout, manifest)
         for shard in manifest.get("shards", {}).values():
             if shard.get("status") == "in_review" and is_stale(shard.get("heartbeat_at")):
@@ -769,6 +880,7 @@ def _shard_payload(layout, shard_id: str) -> dict[str, Any]:
 def load_status_snapshot(*, root: Path, state_dir: Path) -> dict[str, Any]:
     layout = build_layout(root, state_dir)
     manifest = load_or_rebuild_manifest(layout)
+    analyze_progress = manifest.get("analyze_progress") or default_analyze_progress()
     prepare_progress = manifest.get("prepare_progress") or default_prepare_progress()
     return {
         "stage": manifest.get("stage"),
@@ -780,6 +892,7 @@ def load_status_snapshot(*, root: Path, state_dir: Path) -> dict[str, Any]:
         "shards_reviewed": int(manifest.get("shards_reviewed", 0)),
         "suppressed_findings": int(manifest.get("suppressed_findings", 0)),
         "trace_summary": manifest.get("trace_summary", {}),
+        "analyze_progress": analyze_progress,
         "prepare_progress": prepare_progress,
         "candidate_overview": manifest.get("candidate_overview", {}),
         "finding_preview": manifest.get("finding_preview", []),

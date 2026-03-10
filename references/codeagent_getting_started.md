@@ -190,6 +190,7 @@ python .codeagent/skills/lua-nil-review/scripts/run_review_cycle.py refresh --pr
 它会把阶段进度打印到 `stderr`，例如：
 
 - 正在分析第几个文件
+- 当前累计发现了多少 finding、最近命中了哪个文件
 - 当前在做 `trace_enrichment` 还是 `building_shards`
 - 已处理多少 finding
 - 已补跑多少次 agentic retrace
@@ -208,6 +209,7 @@ artifacts/string-find-nil/manifest.json
 
 重点关注里面的：
 
+- `analyze_progress`
 - `trace_summary`
 - `prepare_progress`
 - `candidate_overview`
@@ -215,6 +217,7 @@ artifacts/string-find-nil/manifest.json
 
 其中：
 
+- `analyze_progress` 会告诉你当前分析跑到哪个文件、已经复用了多少文件、已经发现了多少 finding、最近命中了哪些具体位置。
 - `candidate_overview` 会告诉你当前还有多少可见 finding、其中多少已经有明确候选路径，以及最常见的候选文件路径。
 - `finding_preview` 会直接给出前几个 finding 的 `candidate_summary`、`scenario_branches` 和 `why_still_uncertain`，不需要你先翻完整 shard。
 

@@ -129,5 +129,6 @@ Valid decisions for MVP are `confirm`, `dismiss`, and `needs_source_escalation`.
 - `trace_bundles/callsite-*.json` stores direct callsite trace output triggered via `trace --file/--line/--expr`.
 - `symbol_index/` stores per-file symbol facts and aggregated module collision data.
 - `symbol_slices/` stores cached function logic slices used by jump and trace payloads.
+- `manifest.json -> analyze_progress` stores live scan feedback such as `findings_discovered`, `parse_errors`, `current_file`, and `recent_findings`.
 - `manifest.json -> prepare_progress` stores live counters for `trace_enrichment` and `building_shards`.
-- `manifest.json -> candidate_overview` and `manifest.json -> finding_preview` expose candidate/path summaries directly to `status`.
+- `manifest.json -> trace_summary`, `candidate_overview`, and `finding_preview` now refresh during prepare, so `status` can show partial results before sharding finishes.

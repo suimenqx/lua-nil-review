@@ -24,6 +24,24 @@ from .common import (
 )
 
 
+def default_analyze_progress() -> dict[str, Any]:
+    return {
+        "phase": "idle",
+        "files_total": 0,
+        "files_done": 0,
+        "analyzed_files": 0,
+        "reused_files": 0,
+        "files_with_findings": 0,
+        "findings_discovered": 0,
+        "suppressed_findings": 0,
+        "parse_errors": 0,
+        "current_file": None,
+        "current_status": None,
+        "current_findings_in_file": 0,
+        "recent_findings": [],
+    }
+
+
 def default_prepare_progress() -> dict[str, Any]:
     return {
         "phase": "idle",
@@ -107,6 +125,7 @@ def default_manifest(layout: StateLayout) -> dict[str, Any]:
         "shards_reviewed": 0,
         "suppressed_findings": 0,
         "trace_summary": {},
+        "analyze_progress": default_analyze_progress(),
         "prepare_progress": default_prepare_progress(),
         "candidate_overview": {},
         "finding_preview": [],
@@ -150,6 +169,7 @@ def load_or_rebuild_manifest(layout: StateLayout) -> dict[str, Any]:
     manifest.setdefault("report_template_version", REPORT_TEMPLATE_VERSION)
     manifest.setdefault("symbol_fingerprint", "")
     manifest.setdefault("trace_summary", {})
+    manifest.setdefault("analyze_progress", default_analyze_progress())
     manifest.setdefault("prepare_progress", default_prepare_progress())
     manifest.setdefault("candidate_overview", {})
     manifest.setdefault("finding_preview", [])

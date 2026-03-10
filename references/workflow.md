@@ -7,6 +7,7 @@ See [architecture.md](architecture.md) first if you want the visual version of t
 The pipeline writes all durable state under `artifacts/string-find-nil/`.
 
 - `manifest.json`: run metadata, progress counters, shard statuses, and lock owner
+- `manifest.json -> analyze_progress`: real-time scan counters, current file, and recent finding preview during `analyze`
 - `manifest.json -> prepare_progress`: real-time counters for trace enrichment and shard building
 - `manifest.json -> candidate_overview`: compact candidate/path summary for visible findings
 - `manifest.json -> finding_preview`: top visible findings with `candidate_summary`, scenario branches, and uncertainty reasons
@@ -66,5 +67,7 @@ If the skill is installed at user scope instead, resolve the actual install path
 - `manifest.json -> trace_summary -> auto_filtered_low_confidence` is a legacy compatibility counter and should normally remain `0` under the evidence-based dismissal policy.
 - `manifest.json -> trace_summary` also records `agentic_retraced`, `agentic_improved`, `agentic_promoted_safe`, and `agentic_frontier_jumps`.
 - While `stage=sharding`, `manifest.json -> prepare_progress` tells you whether the workflow is still in `trace_enrichment` or has moved to `building_shards`. It is normal for `shards_total` to remain `0` until trace enrichment finishes.
+- While `stage=analyzing`, `manifest.json -> analyze_progress` gives more than file counts: `analyzed_files`, `reused_files`, `findings_discovered`, `parse_errors`, `current_file`, and `recent_findings` all refresh during the scan.
+- During `trace_enrichment`, `manifest.json -> trace_summary`, `candidate_overview`, and `finding_preview` now refresh incrementally instead of waiting for the whole prepare phase to finish.
 - Every visible finding now carries explicit investigation fields: `candidate_summary`, `candidate_count`, `top_candidate_paths`, `scenario_branches`, `why_still_uncertain`, and `investigation_leads`.
 - `final/report.md` surfaces collision branch outcomes as `[path] -> status` lines so scenario-dependent results stay explicit.
