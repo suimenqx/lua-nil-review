@@ -41,8 +41,8 @@ flowchart LR
 - The same wrapper also exposes `status`, and `refresh/claim --progress` stream manifest-backed progress for large repositories.
 - The lower-level `scripts/*.py` files are thin entrypoints for manual phase control. They all end up in `lua_nil_review.workflow`.
 - `workflow.py` is the real state machine. It decides when to reuse old analysis, shard findings, reclaim stale review work, and merge outputs.
-- `analyzer.py` is intentionally narrow: it parses Lua, tracks local nil-state, records evidence, and emits short snippets instead of forcing full-file review.
-- `prepare` is where most of the agentic behavior happens now: initial trace, strategic retry for uncertain findings, and frontier `jump` expansion all happen before a shard is exposed to review.
+- `analyzer.py` is intentionally narrow: it parses Lua, tracks local nil-state, discovers `string.find` sinks across expression contexts, and emits short snippets instead of forcing full-file review.
+- `prepare` is where most of the agentic behavior happens now: initial trace, caller/callee follow-up, strategic retry for uncertain findings, and frontier `jump` expansion all happen before a shard is exposed to review.
 - `state.py` owns the persisted layout and lock discipline so long reviews can resume safely.
 
 ## 2. Skill and Adapter Surfaces
@@ -102,6 +102,7 @@ sequenceDiagram
 
 - `claim` is not just "claim". The wrapper refreshes analysis and shard preparation first, then claims exactly one shard.
 - The refresh path is agentic, not passive. Before a human or CodeAgent reviewer sees a shard, the workflow already tries a second deeper trace pass on uncertain findings and attaches extra jump evidence when possible.
+- Visible findings now carry direct investigation artifacts, including `candidate_summary`, `scenario_branches`, and `why_still_uncertain`, so the agent does not need to reconstruct candidate context from raw trace graphs first.
 - Resume behavior is content-hash based. Unchanged Lua files reuse prior analysis.
 - Snippets are first-class review inputs. The workflow is designed to avoid opening giant Lua files unless evidence is insufficient.
 - Review work is fault-tolerant. Shards stuck in `in_review` are reclaimed when their heartbeat is stale.

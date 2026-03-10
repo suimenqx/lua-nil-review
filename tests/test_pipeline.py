@@ -141,6 +141,34 @@ class PipelineTestCase(unittest.TestCase):
         shard_findings = [json.loads(line) for line in shard_files[0].read_text(encoding="utf-8").splitlines() if line]
         self.assertEqual(2, len(shard_findings))
 
+    def test_expression_context_calls_and_unknown_obligations_are_detected(self) -> None:
+        self.write_file(
+            "contexts.lua",
+            "local function assigned()\n"
+            "  local value = nil\n"
+            "  local ok = string.find(value, 'a')\n"
+            "end\n"
+            "local function branch(name)\n"
+            "  if string.find(name, 'b') then\n"
+            "    return true\n"
+            "  end\n"
+            "  return wrap(string.find(name, 'c'))\n"
+            "end\n"
+            "local function unknown_name()\n"
+            "  return string.find(mystery_name, 'd')\n"
+            "end\n",
+        )
+
+        self.analyze()
+        findings_by_line = {finding["line"]: finding for finding in self.load_all_findings()}
+        self.assertEqual({3, 6, 9, 12}, set(findings_by_line))
+        self.assertEqual("nil", findings_by_line[3]["nil_state"])
+        self.assertEqual("maybe_nil", findings_by_line[6]["nil_state"])
+        self.assertEqual("maybe_nil", findings_by_line[9]["nil_state"])
+        self.assertEqual("unknown", findings_by_line[12]["nil_state"])
+        self.assertEqual(3, findings_by_line[12]["risk_level"])
+        self.assertEqual("unresolved_name_unverified", findings_by_line[12]["risk_category"])
+
     def test_incremental_reuses_unchanged_files(self) -> None:
         self.write_file("a.lua", "local function a()\n  local y = nil\n  string.find(y, 'a')\nend\n")
         self.write_file("b.lua", "local function b()\n  local y = fetch()\n  string.find(y, 'b')\nend\n")

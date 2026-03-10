@@ -210,6 +210,13 @@ artifacts/string-find-nil/manifest.json
 
 - `trace_summary`
 - `prepare_progress`
+- `candidate_overview`
+- `finding_preview`
+
+其中：
+
+- `candidate_overview` 会告诉你当前还有多少可见 finding、其中多少已经有明确候选路径，以及最常见的候选文件路径。
+- `finding_preview` 会直接给出前几个 finding 的 `candidate_summary`、`scenario_branches` 和 `why_still_uncertain`，不需要你先翻完整 shard。
 
 ### 为什么明明扫了很多文件，`shards_total` 还是 `0`
 
@@ -328,6 +335,7 @@ CodeAgent 会先确认：
 `refresh` 里的 `analyze` 会先扫描每个 Lua 文件，找出：
 
 - `string.find(arg1, ...)` 这类目标调用
+- 这些调用不只限于独立语句，也包括赋值右侧、`return`、`if` 条件和更深层的表达式上下文
 - `arg1` 在本地作用域里的来源
 - 是否有明显的 `nil`、索引访问、函数返回、guard 收窄等证据
 
@@ -342,7 +350,7 @@ CodeAgent 会先确认：
 - `Level 2`：本地未保护索引
   例子：`info.user.email`
 - `Level 3`：跨函数返回值或函数参数，暂时还没证明安全或危险
-  例子：`local x = Utils.Get()`，或者 `local function sink(name) string.find(name, ...) end`
+  例子：`local x = Utils.Get()`，`local function sink(name) string.find(name, ...) end`，或者 `string.find(mystery_name, ...)`
 
 这一步的目的，是先把“明显危险”和“只是缺上下文”的问题分开。
 
@@ -355,6 +363,7 @@ CodeAgent 会先确认：
 - 自动跳到符号定义
 - 自动追踪函数返回路径
 - 如果 sink 参数来自函数形参，自动反向查 caller 传参链
+- 如果本地分析只能得到 `unknown`，也不会直接丢弃，而是保留成 obligation，继续往 caller/callee/frontier lead 查
 - 在冲突模块里分别看不同物理路径的结果
 - 生成 `trace_bundle`
 
@@ -390,6 +399,10 @@ CodeAgent 会先确认：
 - `trace_bundle`
 - `trace_slices`
 - `agentic_trace`
+- `candidate_summary`
+- `scenario_branches`
+- `why_still_uncertain`
+- `investigation_leads`
 
 也就是说，CodeAgent 已经先完成了：
 
@@ -438,11 +451,11 @@ CodeAgent 会先确认：
 最常用的几个位置：
 
 - `artifacts/string-find-nil/analysis/*.json`
-  这里能看到 finding 的 `risk_level`、`risk_tier`、`human_review_visible`、`agentic_trace`
+  这里能看到 finding 的 `risk_level`、`risk_tier`、`human_review_visible`、`agentic_trace`，以及 `candidate_summary / scenario_branches / why_still_uncertain`
 - `artifacts/string-find-nil/trace_bundles/*.json`
-  这里能看到自动 trace 的分支结果，以及二次策略化扩展留下的 `agentic_strategy`
+  这里能看到自动 trace 的分支结果、frontier leads，以及二次策略化扩展留下的 `agentic_strategy`
 - `artifacts/string-find-nil/manifest.json`
-  这里能看到 `trace_summary`，包括 `agentic_retraced` 这类统计
+  这里能看到 `trace_summary`，包括 `agentic_retraced` 这类统计，以及 `candidate_overview / finding_preview`
 - `python .codeagent/skills/lua-nil-review/scripts/run_review_cycle.py status`
   这里能直接看到当前状态快照，不需要你手动翻完整个 `manifest.json`
 - `artifacts/string-find-nil/final/summary.json`
@@ -478,6 +491,12 @@ python .codeagent/skills/lua-nil-review/scripts/run_review_cycle.py claim
 - `trace_bundle`
 - `trace_slices`
 - `agentic_trace`
+- `candidate_summary`
+- `candidate_count`
+- `top_candidate_paths`
+- `scenario_branches`
+- `why_still_uncertain`
+- `investigation_leads`
 
 这些就是技能已经帮你缩小后的证据范围。
 

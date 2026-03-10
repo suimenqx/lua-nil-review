@@ -134,6 +134,49 @@ class SymbolTracingTestCase(unittest.TestCase):
         self.assertEqual(2, len(finding["trace_slices"]))
         self.assertEqual({"safe", "risky"}, {item["status"] for item in finding["trace_bundle"]["branch_outcomes"]})
         self.assertTrue(finding["trace_bundle"]["external_config_dependency"])
+        self.assertIn("src/ui/config.lua", finding["candidate_summary"])
+        self.assertIn("src/net/config.lua", finding["candidate_summary"])
+        self.assertEqual(2, finding["candidate_count"])
+        self.assertEqual({"src/ui/config.lua", "src/net/config.lua"}, set(finding["top_candidate_paths"]))
+        self.assertEqual({"safe", "risky"}, {item["status"] for item in finding["scenario_branches"] if item["source"] == "trace_branch"})
+        contracts = [item.get("contract", {}) for item in finding["scenario_branches"] if item["source"] == "trace_branch"]
+        self.assertEqual({"always_non_nil", "always_nil"}, {item.get("return_state") for item in contracts})
+
+    def test_status_snapshot_surfaces_candidate_preview(self) -> None:
+        self.write_file(
+            "main.lua",
+            "local Config = require('config')\n"
+            "local function demo(name)\n"
+            "  local value = Config.get(name)\n"
+            "  string.find(value, 'a')\n"
+            "end\n",
+        )
+        self.write_file(
+            "src/ui/config.lua",
+            "local M = {}\n"
+            "function M.get(name)\n"
+            "  return name or ''\n"
+            "end\n"
+            "return M\n",
+        )
+        self.write_file(
+            "src/net/config.lua",
+            "local M = {}\n"
+            "function M.get(name)\n"
+            "  return nil\n"
+            "end\n"
+            "return M\n",
+        )
+
+        self.run_wrapper("refresh")
+        status = self.run_wrapper("status")["status"]
+        self.assertEqual(1, status["candidate_overview"]["visible_findings"])
+        self.assertEqual(1, status["candidate_overview"]["with_explicit_candidates"])
+        self.assertEqual({"src/ui/config.lua", "src/net/config.lua"}, set(status["candidate_overview"]["top_candidate_paths"]))
+        preview = status["finding_preview"][0]
+        self.assertIn("src/ui/config.lua", preview["candidate_summary"])
+        self.assertEqual(2, preview["candidate_count"])
+        self.assertEqual({"src/ui/config.lua", "src/net/config.lua"}, set(preview["top_candidate_paths"]))
 
     def test_safe_trace_auto_silences_finding(self) -> None:
         self.write_file(
@@ -378,6 +421,26 @@ class SymbolTracingTestCase(unittest.TestCase):
         self.assertEqual("uncertain", finding["trace_status"])
         self.assertFalse(finding["trace_auto_silenced"])
         self.assertTrue(finding["human_review_visible"])
+
+    def test_unknown_name_becomes_visible_obligation_with_explicit_leads(self) -> None:
+        self.write_file(
+            "main.lua",
+            "local function demo()\n"
+            "  return string.find(mystery_name, 'a')\n"
+            "end\n",
+        )
+
+        refresh = self.run_wrapper("refresh")
+        self.assertEqual(1, refresh["prepare"]["shards_total"])
+        finding = self.load_analysis_findings()[0]
+        self.assertEqual("unknown", finding["nil_state"])
+        self.assertEqual(3, finding["risk_level"])
+        self.assertEqual("unresolved_name_unverified", finding["risk_category"])
+        self.assertEqual("uncertain", finding["trace_status"])
+        self.assertIn("No concrete candidate branches were recovered", finding["candidate_summary"])
+        self.assertIn("unresolved in the local scope", finding["why_still_uncertain"])
+        self.assertGreaterEqual(len(finding["investigation_leads"]), 1)
+        self.assertEqual("parameter_or_unknown", finding["investigation_leads"][0]["kind"])
 
     def test_parameter_trace_auto_silences_only_when_caller_chain_is_safe(self) -> None:
         self.write_file(

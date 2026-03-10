@@ -91,6 +91,8 @@ def run_analyze(*, root: Path, config_path: str | None, state_dir: Path, resume:
         manifest["stage"] = "analyzing"
         manifest["lock_owner"] = owner
         manifest["prepare_progress"] = default_prepare_progress()
+        manifest["candidate_overview"] = {}
+        manifest["finding_preview"] = []
         save_manifest(layout, manifest)
 
         current_paths = discover_lua_files(root, config, layout.state_dir)
@@ -277,6 +279,212 @@ def _save_prepare_progress(layout, manifest: dict[str, Any], owner: str, progres
     save_manifest(layout, manifest)
 
 
+def _initial_finding_summary(finding: dict[str, Any]) -> dict[str, Any]:
+    if finding.get("suppressed"):
+        return {
+            "candidate_summary": "Finding was suppressed before agentic investigation; no caller or callee candidates were scanned.",
+            "candidate_count": 0,
+            "top_candidate_paths": [],
+            "scenario_branches": [
+                {
+                    "source": "suppression",
+                    "status": "suppressed",
+                    "file": finding.get("file"),
+                    "line": finding.get("line"),
+                    "expression": finding.get("arg_text"),
+                    "summary": "Suppression matched before tracing started.",
+                }
+            ],
+            "why_still_uncertain": None,
+            "investigation_leads": [],
+        }
+    return {
+        "candidate_summary": "Local flow already proves a nil value reaches the sink; no caller or callee candidates were needed.",
+        "candidate_count": 0,
+        "top_candidate_paths": [],
+        "scenario_branches": [
+            {
+                "source": "local_flow",
+                "status": "risky",
+                "file": finding.get("file"),
+                "line": finding.get("line"),
+                "expression": finding.get("arg_text"),
+                "summary": "Local analysis proved a nil value reaches the sink before cross-function tracing was needed.",
+            }
+        ],
+        "why_still_uncertain": None,
+        "investigation_leads": [],
+    }
+
+
+def _frontier_jump_branch_status(jump: dict[str, Any]) -> str:
+    statuses = []
+    for candidate in jump.get("candidates", []):
+        return_state = candidate.get("return_state")
+        if return_state == "always_non_nil":
+            statuses.append("safe")
+        elif return_state == "always_nil":
+            statuses.append("risky")
+        else:
+            statuses.append("uncertain")
+    normalized = {item for item in statuses if item}
+    if not normalized:
+        return "uncertain"
+    if normalized == {"safe"}:
+        return "safe"
+    if normalized == {"risky"}:
+        return "risky"
+    if "safe" in normalized and "risky" in normalized:
+        return "mixed"
+    return "uncertain"
+
+
+def _frontier_jump_summary(jump: dict[str, Any]) -> str:
+    expression = jump.get("expression") or "unknown call"
+    candidate_count = int(jump.get("candidate_count", 0))
+    if candidate_count <= 0:
+        return f"Frontier jump for '{expression}' found no concrete definition candidates."
+    return f"Frontier jump for '{expression}' found {candidate_count} candidate definition(s)."
+
+
+def _why_still_uncertain(bundle: dict[str, Any], scenario_branches: list[dict[str, Any]]) -> str | None:
+    overall = bundle.get("overall")
+    if overall not in {"uncertain", "budget_exhausted"}:
+        return None
+    reasons: list[str] = []
+    if bundle.get("budget", {}).get("budget_exhausted"):
+        reasons.append("trace budget exhausted before all branches were resolved")
+    if bundle.get("external_config_dependency"):
+        reasons.append("module resolution still depends on packaging priority or override selection")
+    for branch in scenario_branches:
+        summary = branch.get("summary")
+        if isinstance(summary, str) and summary:
+            reasons.append(summary)
+    for lead in bundle.get("investigation_leads", []):
+        summary = lead.get("summary")
+        if isinstance(summary, str) and summary:
+            reasons.append(summary)
+    if not reasons and bundle.get("summary"):
+        reasons.append(str(bundle["summary"]))
+    return "; ".join(dict.fromkeys(reasons[:4])) if reasons else None
+
+
+def _trace_candidate_summary(bundle: dict[str, Any]) -> dict[str, Any]:
+    scenario_branches: list[dict[str, Any]] = []
+    top_paths: list[str] = []
+    candidate_count = 0
+    for branch in bundle.get("branch_outcomes", []):
+        scenario = {
+            "source": "trace_branch",
+            "status": branch.get("status", "unknown"),
+            "file": branch.get("file"),
+            "line": branch.get("line"),
+            "qualified_name": branch.get("qualified_name"),
+            "function_id": branch.get("function_id"),
+            "slice_path": branch.get("slice_path"),
+            "expression": branch.get("qualified_name") or branch.get("argument_expression"),
+            "summary": branch.get("summary"),
+        }
+        if branch.get("contract") is not None:
+            scenario["contract"] = branch.get("contract")
+        if branch.get("argument_expression") is not None:
+            scenario["argument_expression"] = branch.get("argument_expression")
+        scenario_branches.append(scenario)
+        if branch.get("file"):
+            top_paths.append(str(branch["file"]))
+        if branch.get("file") or branch.get("qualified_name") or branch.get("argument_expression"):
+            candidate_count += 1
+    strategy = bundle.get("agentic_strategy", {})
+    for jump in strategy.get("frontier_jumps", []):
+        scenario = {
+            "source": "frontier_jump",
+            "status": _frontier_jump_branch_status(jump),
+            "file": jump.get("file"),
+            "line": jump.get("line"),
+            "expression": jump.get("expression"),
+            "summary": _frontier_jump_summary(jump),
+            "candidate_count": int(jump.get("candidate_count", 0)),
+            "candidates": list(jump.get("candidates", [])),
+        }
+        scenario_branches.append(scenario)
+        candidate_count += int(jump.get("candidate_count", 0))
+        for candidate in jump.get("candidates", []):
+            if candidate.get("file"):
+                top_paths.append(str(candidate["file"]))
+    top_candidate_paths = list(dict.fromkeys(top_paths))[:5]
+    branch_labels: list[str] = []
+    for branch in scenario_branches[:4]:
+        label = branch.get("file") or branch.get("expression") or "local"
+        branch_labels.append(f"{label} -> {branch.get('status', 'unknown')}")
+    if candidate_count > 0 and branch_labels:
+        candidate_summary = f"Investigated {candidate_count} candidate branch(es): " + "; ".join(branch_labels) + "."
+    else:
+        lead_summaries = [
+            lead.get("summary")
+            for lead in bundle.get("investigation_leads", [])
+            if isinstance(lead.get("summary"), str) and lead.get("summary")
+        ]
+        if lead_summaries:
+            candidate_summary = f"No concrete candidate branches were recovered. Outstanding lead: {lead_summaries[0]}"
+        else:
+            candidate_summary = bundle.get("summary") or "Agentic tracing did not recover any concrete candidate branches."
+    return {
+        "candidate_summary": candidate_summary,
+        "candidate_count": candidate_count,
+        "top_candidate_paths": top_candidate_paths,
+        "scenario_branches": scenario_branches[:8],
+        "why_still_uncertain": _why_still_uncertain(bundle, scenario_branches),
+        "investigation_leads": list(bundle.get("investigation_leads", []))[:8],
+    }
+
+
+def _apply_investigation_summary(finding: dict[str, Any], bundle: dict[str, Any] | None = None) -> None:
+    summary = _initial_finding_summary(finding) if bundle is None else _trace_candidate_summary(bundle)
+    finding.update(summary)
+
+
+def _finding_preview_entries(findings: list[dict[str, Any]], *, limit: int = 5) -> list[dict[str, Any]]:
+    preview: list[dict[str, Any]] = []
+    for finding in findings[:limit]:
+        preview.append(
+            {
+                "finding_id": finding.get("finding_id"),
+                "file": finding.get("file"),
+                "line": finding.get("line"),
+                "message": finding.get("message"),
+                "risk_level": finding.get("risk_level"),
+                "risk_tier": finding.get("risk_tier"),
+                "trace_status": finding.get("trace_status"),
+                "candidate_summary": finding.get("candidate_summary"),
+                "candidate_count": finding.get("candidate_count", 0),
+                "top_candidate_paths": list(finding.get("top_candidate_paths", [])),
+                "scenario_branches": list(finding.get("scenario_branches", []))[:4],
+                "why_still_uncertain": finding.get("why_still_uncertain"),
+            }
+        )
+    return preview
+
+
+def _candidate_overview(findings: list[dict[str, Any]], trace_summary: dict[str, Any]) -> dict[str, Any]:
+    paths: list[str] = []
+    uncertain = 0
+    with_candidates = 0
+    for finding in findings:
+        if finding.get("candidate_count", 0):
+            with_candidates += 1
+        if finding.get("trace_status") in {"uncertain", "budget_exhausted"}:
+            uncertain += 1
+        for path in finding.get("top_candidate_paths", []):
+            paths.append(path)
+    return {
+        "visible_findings": len(findings),
+        "with_explicit_candidates": with_candidates,
+        "uncertain_findings": uncertain,
+        "auto_silenced": int(trace_summary.get("auto_silenced", 0)),
+        "top_candidate_paths": list(dict.fromkeys(paths))[:8],
+    }
+
+
 def _enrich_findings_with_traces(layout, root: Path, config: ReviewConfig, manifest: dict[str, Any], owner: str) -> dict[str, int]:
     if not config.symbol_tracing.enabled:
         return {"traced": 0, "auto_silenced": 0, "auto_filtered_low_confidence": 0, "escalated": 0, "visible_after_trace": 0, "level_1": 0, "level_2": 0, "level_3": 0, "agentic_retraced": 0, "agentic_improved": 0, "agentic_promoted_safe": 0, "agentic_frontier_jumps": 0}
@@ -309,6 +517,7 @@ def _enrich_findings_with_traces(layout, root: Path, config: ReviewConfig, manif
             if finding.get("suppressed"):
                 finding["human_review_visible"] = False
                 finding["auto_filtered_reason"] = "suppressed"
+                _apply_investigation_summary(finding)
                 continue
             progress["current_finding_id"] = finding.get("finding_id")
             progress["current_file"] = finding.get("file")
@@ -326,6 +535,8 @@ def _enrich_findings_with_traces(layout, root: Path, config: ReviewConfig, manif
                 finding["trace_gate_passed"] = True
                 finding["human_review_visible"] = True
                 finding["auto_filtered_reason"] = None
+                _apply_investigation_summary(finding)
+                progress["current_candidate_summary"] = finding.get("candidate_summary")
                 visible_after_trace += 1
                 progress["findings_done"] += 1
                 progress["visible_after_trace"] = visible_after_trace
@@ -386,6 +597,7 @@ def _enrich_findings_with_traces(layout, root: Path, config: ReviewConfig, manif
                 for item in bundle.get("branch_outcomes", [])
                 if item.get("slice_path")
             ][: config.symbol_tracing.max_unique_slices]
+            _apply_investigation_summary(finding, bundle)
             if finding["human_review_visible"]:
                 visible_after_trace += 1
             progress["findings_done"] += 1
@@ -395,6 +607,7 @@ def _enrich_findings_with_traces(layout, root: Path, config: ReviewConfig, manif
             progress["agentic_improved"] = agentic_improved
             progress["agentic_promoted_safe"] = agentic_promoted_safe
             progress["agentic_frontier_jumps"] = agentic_frontier_jumps
+            progress["current_candidate_summary"] = finding.get("candidate_summary")
             _save_prepare_progress(layout, manifest, owner, progress)
             changed = True
         if changed:
@@ -442,6 +655,7 @@ def run_prepare_shards(*, root: Path, state_dir: Path, resume: bool, config_path
         progress["current_finding_id"] = None
         progress["current_file"] = None
         progress["current_line"] = None
+        progress["current_candidate_summary"] = None
         progress["active_findings_total"] = len(active)
         _save_prepare_progress(layout, manifest, owner, progress)
         shards: list[list[dict[str, Any]]] = []
@@ -497,6 +711,8 @@ def run_prepare_shards(*, root: Path, state_dir: Path, resume: bool, config_path
         manifest["shards_reviewed"] = len([item for item in new_manifest_shards.values() if item["status"] in {"reviewed", "merged"}])
         manifest["suppressed_findings"] = suppressed
         manifest["trace_summary"] = trace_summary
+        manifest["candidate_overview"] = _candidate_overview(active, trace_summary)
+        manifest["finding_preview"] = _finding_preview_entries(active)
         manifest["stage"] = "sharded"
         progress["phase"] = "completed"
         progress["active_findings_total"] = len(active)
@@ -504,6 +720,7 @@ def run_prepare_shards(*, root: Path, state_dir: Path, resume: bool, config_path
         progress["current_finding_id"] = None
         progress["current_file"] = None
         progress["current_line"] = None
+        progress["current_candidate_summary"] = None
         manifest["prepare_progress"] = progress
         save_manifest(layout, manifest)
         return {
@@ -564,6 +781,8 @@ def load_status_snapshot(*, root: Path, state_dir: Path) -> dict[str, Any]:
         "suppressed_findings": int(manifest.get("suppressed_findings", 0)),
         "trace_summary": manifest.get("trace_summary", {}),
         "prepare_progress": prepare_progress,
+        "candidate_overview": manifest.get("candidate_overview", {}),
+        "finding_preview": manifest.get("finding_preview", []),
     }
 
 
@@ -768,12 +987,15 @@ def run_merge(*, root: Path, state_dir: Path, config_path: str | None) -> dict[s
                         f"- New vs baseline: {'yes' if finding['is_new'] else 'no'}",
                         f"- Rationale: {finding['rationale'] or 'n/a'}",
                         f"- Trace summary: {finding.get('trace_summary', 'n/a')}",
+                        f"- Candidate summary: {finding.get('candidate_summary', 'n/a')}",
+                        f"- Why still uncertain: {finding.get('why_still_uncertain') or 'n/a'}",
                         "",
                     ]
                 )
-                for branch in finding.get("trace_branch_outcomes", []):
-                    report_lines.append(f"  - [{branch.get('file', 'unknown path')}] -> {branch.get('status', 'unknown')}")
-                if finding.get("trace_branch_outcomes"):
+                for branch in finding.get("scenario_branches", []):
+                    label = branch.get("file") or branch.get("expression") or "unknown path"
+                    report_lines.append(f"  - [{label}] -> {branch.get('status', 'unknown')}")
+                if finding.get("scenario_branches"):
                     report_lines.append("")
         if escalated:
             report_lines.extend(["## Needs Source Escalation", ""])
@@ -782,8 +1004,12 @@ def run_merge(*, root: Path, state_dir: Path, config_path: str | None) -> dict[s
                     f"- {finding['file']}:{finding['line']} `{normalize_whitespace(finding['call_text'])}` "
                     f"(Level {finding.get('risk_level', 'n/a')}, trace={finding.get('trace_status', 'n/a')})"
                 )
-                for branch in finding.get("trace_branch_outcomes", []):
-                    report_lines.append(f"  - [{branch.get('file', 'unknown path')}] -> {branch.get('status', 'unknown')}")
+                report_lines.append(f"  - Candidate summary: {finding.get('candidate_summary', 'n/a')}")
+                if finding.get("why_still_uncertain"):
+                    report_lines.append(f"  - Why still uncertain: {finding['why_still_uncertain']}")
+                for branch in finding.get("scenario_branches", []):
+                    label = branch.get("file") or branch.get("expression") or "unknown path"
+                    report_lines.append(f"  - [{label}] -> {branch.get('status', 'unknown')}")
             report_lines.append("")
         if pending_shards:
             report_lines.extend(["## Pending Shards", ""])

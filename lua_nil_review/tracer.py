@@ -18,6 +18,7 @@ from .state import StateLayout, build_layout
 from .symbol_index import SymbolRepository
 from .symbol_models import FunctionSymbol
 from .symbol_query import jump_to_definition
+from .ast_utils import iter_call_expressions
 
 
 @dataclass
@@ -100,7 +101,13 @@ class TraceEngine:
         if function_symbol is None:
             raise RuntimeError(f"Unable to locate function scope for {file}:{finding['line']}.")
         scope = self._function_scope(file, function_symbol)
-        sink_call = self._locate_sink_call(scope.node, finding["line"], scope.source)
+        sink_call = self._locate_sink_call(
+            scope.node,
+            finding["line"],
+            finding.get("column"),
+            scope.source,
+            finding.get("call_text"),
+        )
         if sink_call is None or not sink_call.args:
             raise RuntimeError(f"Unable to locate sink call for finding {finding['finding_id']}.")
 
@@ -217,6 +224,7 @@ class TraceEngine:
             "trace_auto_silenced": auto_silenced,
             "needs_source_escalation": needs_source_escalation,
             "external_config_dependency": external_config_dependency,
+            "investigation_leads": _frontier_leads(self.recorder.nodes, frontier_node_ids),
         }
         if extra:
             bundle.update(extra)
@@ -466,6 +474,7 @@ class TraceEngine:
             "line": int(caller["line"]),
             "function_id": caller_function.function_id,
             "qualified_name": caller_function.qualified_name,
+            "argument_expression": arg_text,
         }
 
     def _resolve_call(self, scope: FunctionScope, expr: Any, *, depth: int, parent_id: str | None) -> list[dict[str, Any]]:
@@ -510,6 +519,7 @@ class TraceEngine:
             outcome["qualified_name"] = candidate["qualified_name"]
             outcome["slice_path"] = candidate["slice_path"]
             outcome["external_config_dependency"] = bool(jump.get("external_config_dependency"))
+            outcome["contract"] = _function_contract_hint(function)
             outcomes.append(outcome)
             self.recorder.nodes[-1]["status"] = outcome["status"]
         self.recorder.nodes[-1]["status"] = _aggregate_status([item["status"] for item in outcomes])
@@ -590,43 +600,33 @@ class TraceEngine:
         self._function_scope_cache[key] = scope
         return scope
 
-    def _locate_sink_call(self, function_node: Any, line: int, source: SourceIndex) -> Any | None:
-        stack = [function_node.body]
-        while stack:
-            node = stack.pop()
-            statements = node.body if isinstance(node, N.Block) else []
-            for statement in statements:
-                if isinstance(statement, N.Call):
-                    call_line, _column = source.line_column_for_node(statement)
-                    if call_line == line and _qualified_name(statement.func) == "string.find":
-                        return statement
-                stack.extend(_nested_blocks(statement))
+    def _locate_sink_call(
+        self,
+        function_node: Any,
+        line: int,
+        column: int | None,
+        source: SourceIndex,
+        call_text: str | None,
+    ) -> Any | None:
+        for call in iter_call_expressions(function_node.body):
+            call_line, call_column = source.line_column_for_node(call)
+            if call_line != line or _qualified_name(call.func) != "string.find":
+                continue
+            if column is not None and call_column != int(column):
+                continue
+            if call_text is not None and normalize_whitespace(_call_text(source, call)) != normalize_whitespace(call_text):
+                continue
+            return call
         return None
 
     def _locate_call_expression(self, function_node: Any, line: int, expression: str, source: SourceIndex) -> Any | None:
         target = expression.replace(":", ".").strip()
-        stack = [function_node.body]
-        while stack:
-            node = stack.pop()
-            statements = node.body if isinstance(node, N.Block) else []
-            for statement in statements:
-                if isinstance(statement, N.Call):
-                    call_line, _column = source.line_column_for_node(statement)
-                    if call_line == line and (_qualified_name(statement.func) or normalize_whitespace(source.node_text(statement.func))) == target:
-                        return statement
-                if isinstance(statement, (N.Assign, N.LocalAssign)):
-                    for value in getattr(statement, "values", []):
-                        if isinstance(value, N.Call):
-                            call_line, _column = source.line_column_for_node(value)
-                            if call_line == line and (_qualified_name(value.func) or normalize_whitespace(source.node_text(value.func))) == target:
-                                return value
-                if isinstance(statement, N.Return):
-                    for value in getattr(statement, "values", []):
-                        if isinstance(value, N.Call):
-                            call_line, _column = source.line_column_for_node(value)
-                            if call_line == line and (_qualified_name(value.func) or normalize_whitespace(source.node_text(value.func))) == target:
-                                return value
-                stack.extend(_nested_blocks(statement))
+        for call in iter_call_expressions(function_node.body):
+            call_line, _column = source.line_column_for_node(call)
+            if call_line != line:
+                continue
+            if (_qualified_name(call.func) or normalize_whitespace(source.node_text(call.func))) == target:
+                return call
         return None
 
 
@@ -858,6 +858,10 @@ def _frontier_jump_summaries(
                         "qualified_name": item.get("qualified_name"),
                         "slice_path": item.get("slice_path"),
                         "return_state": (item.get("return_summary") or {}).get("state"),
+                        "return_reason": (item.get("return_summary") or {}).get("reason"),
+                        "guards": list((item.get("return_summary") or {}).get("guards", [])),
+                        "dependencies": list((item.get("return_summary") or {}).get("dependencies", [])),
+                        "confidence": (item.get("return_summary") or {}).get("confidence"),
                     }
                     for item in jump.get("candidates", [])
                 ],
@@ -1014,6 +1018,44 @@ def _find_latest_assignment(function_node: Any, name: str, before_line: int, sou
 
     visit_block(function_node.body)
     return latest
+
+
+def _call_text(source: SourceIndex, call: Any) -> str:
+    return f"{source.node_text(call.func)}({', '.join(source.node_text(arg) for arg in getattr(call, 'args', []))})"
+
+
+def _function_contract_hint(function: FunctionSymbol) -> dict[str, Any] | None:
+    summary = function.return_summary
+    if summary is None:
+        return None
+    return {
+        "return_state": summary.state,
+        "return_reason": summary.reason,
+        "guards": list(summary.guards),
+        "dependencies": [item.to_dict() for item in summary.dependencies],
+        "confidence": summary.confidence,
+    }
+
+
+def _frontier_leads(nodes: list[dict[str, Any]], frontier_ids: list[str]) -> list[dict[str, Any]]:
+    leads: list[dict[str, Any]] = []
+    nodes_by_id = {node.get("node_id"): node for node in nodes if node.get("node_id")}
+    for node_id in frontier_ids:
+        node = nodes_by_id.get(node_id)
+        if not node:
+            continue
+        leads.append(
+            {
+                "node_id": node_id,
+                "kind": node.get("kind"),
+                "file": node.get("file"),
+                "line": node.get("line"),
+                "expression": node.get("expression"),
+                "status": node.get("status"),
+                "summary": node.get("summary"),
+            }
+        )
+    return leads
 
 
 def _qualified_name(node: Any) -> str | None:

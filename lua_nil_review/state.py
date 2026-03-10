@@ -40,6 +40,7 @@ def default_prepare_progress() -> dict[str, Any]:
         "current_finding_id": None,
         "current_file": None,
         "current_line": None,
+        "current_candidate_summary": None,
         "active_findings_total": 0,
         "shards_built": 0,
     }
@@ -107,6 +108,8 @@ def default_manifest(layout: StateLayout) -> dict[str, Any]:
         "suppressed_findings": 0,
         "trace_summary": {},
         "prepare_progress": default_prepare_progress(),
+        "candidate_overview": {},
+        "finding_preview": [],
         "updated_at": utc_now(),
         "lock_owner": "",
         "shards": {},
@@ -148,6 +151,8 @@ def load_or_rebuild_manifest(layout: StateLayout) -> dict[str, Any]:
     manifest.setdefault("symbol_fingerprint", "")
     manifest.setdefault("trace_summary", {})
     manifest.setdefault("prepare_progress", default_prepare_progress())
+    manifest.setdefault("candidate_overview", {})
+    manifest.setdefault("finding_preview", [])
     return manifest
 
 

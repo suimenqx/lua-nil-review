@@ -8,6 +8,8 @@ The pipeline writes all durable state under `artifacts/string-find-nil/`.
 
 - `manifest.json`: run metadata, progress counters, shard statuses, and lock owner
 - `manifest.json -> prepare_progress`: real-time counters for trace enrichment and shard building
+- `manifest.json -> candidate_overview`: compact candidate/path summary for visible findings
+- `manifest.json -> finding_preview`: top visible findings with `candidate_summary`, scenario branches, and uncertainty reasons
 - `files.jsonl`: one entry per Lua file with file hash, analysis status, and analysis artifact path
 - `analysis/<file_id>.json`: per-file findings and parse status
 - `symbol_index/files/<file_id>.json`: per-file symbol facts
@@ -53,12 +55,16 @@ If the skill is installed at user scope instead, resolve the actual install path
 
 ## Trace Gating
 
-- `prepare` enriches every unsuppressed `maybe_nil` finding with a persisted trace bundle before sharding.
+- `analyze` now enumerates `string.find(arg1, ...)` sinks across expression contexts, not just standalone call statements. Assignment RHS, return expressions, `if` tests, and nested expression trees all feed the same finding pipeline.
+- Local `non_nil` evidence still suppresses a sink immediately, but `nil`, `maybe_nil`, and `unknown` all become findings so agentic investigation can start.
+- `prepare` enriches every unsuppressed non-deterministic finding with a persisted trace bundle before sharding.
 - Level `3` findings include unverified function returns and parameter-origin sinks. The tracer now follows both callee returns and caller argument chains within the configured budget.
+- `unknown` values are retained as low-confidence obligations. They are not dropped at analysis time; they stay visible unless later trace proves them safe.
 - If the first trace still ends in `uncertain` or `budget_exhausted`, `prepare` runs one more strategic pass before claim with a larger trace budget and frontier `jump` summaries attached to the trace bundle.
 - Any unsuppressed finding stays human-visible unless trace proves it safe and there is no unresolved external module dependency.
 - Safe traces are auto-silenced and counted in `manifest.json -> trace_summary -> auto_silenced`.
 - `manifest.json -> trace_summary -> auto_filtered_low_confidence` is a legacy compatibility counter and should normally remain `0` under the evidence-based dismissal policy.
 - `manifest.json -> trace_summary` also records `agentic_retraced`, `agentic_improved`, `agentic_promoted_safe`, and `agentic_frontier_jumps`.
 - While `stage=sharding`, `manifest.json -> prepare_progress` tells you whether the workflow is still in `trace_enrichment` or has moved to `building_shards`. It is normal for `shards_total` to remain `0` until trace enrichment finishes.
+- Every visible finding now carries explicit investigation fields: `candidate_summary`, `candidate_count`, `top_candidate_paths`, `scenario_branches`, `why_still_uncertain`, and `investigation_leads`.
 - `final/report.md` surfaces collision branch outcomes as `[path] -> status` lines so scenario-dependent results stay explicit.

@@ -42,10 +42,11 @@ The analyzer accepts a JSON config file with these keys:
 
 - `Level 1 / high`: deterministic nil, including literal `nil` and local table reads that provably miss a key.
 - `Level 2 / medium`: local unguarded indexed reads such as `info.user.email`.
-- `Level 3 / low`: function-return or parameter-origin findings that are unverified before symbol tracing.
+- `Level 3 / low`: function-return, parameter-origin, or locally unresolved (`unknown`) findings that are unverified before symbol tracing.
 
 Evidence-based dismissal is the current default:
 
+- `analyze` discovers `string.find` sinks in expression contexts, not only standalone call statements
 - every unsuppressed finding is retained for review unless trace proves it safe
 - bounded tracing runs before sharding so CodeAgent can dismiss safe findings automatically
 - if a finding is still `uncertain` or `budget_exhausted`, CodeAgent runs one agentic retry before claim with a deeper trace budget and targeted frontier `jump` expansion
@@ -123,9 +124,10 @@ Valid decisions for MVP are `confirm`, `dismiss`, and `needs_source_escalation`.
 - `final/summary.json` contains counts plus confirmed and escalated findings.
 - `final/report.md` is the human-readable review output.
 - `suppressed` findings stay in per-file analysis artifacts but do not become review shards.
-- `analysis/<file_id>.json` stores `risk_level`, `risk_tier`, `human_review_visible`, and trace gating fields for each finding.
-- `trace_bundles/<finding_id>.json` stores bounded cross-function trace output for active findings.
+- `analysis/<file_id>.json` stores `risk_level`, `risk_tier`, `human_review_visible`, and direct investigation fields such as `candidate_summary`, `candidate_count`, `top_candidate_paths`, `scenario_branches`, `why_still_uncertain`, and `investigation_leads`.
+- `trace_bundles/<finding_id>.json` stores bounded cross-function trace output, frontier leads, and pre-claim agentic retry metadata for active findings.
 - `trace_bundles/callsite-*.json` stores direct callsite trace output triggered via `trace --file/--line/--expr`.
 - `symbol_index/` stores per-file symbol facts and aggregated module collision data.
 - `symbol_slices/` stores cached function logic slices used by jump and trace payloads.
 - `manifest.json -> prepare_progress` stores live counters for `trace_enrichment` and `building_shards`.
+- `manifest.json -> candidate_overview` and `manifest.json -> finding_preview` expose candidate/path summaries directly to `status`.

@@ -15,6 +15,7 @@ except ImportError as exc:  # pragma: no cover
 from .common import BUILTIN_NON_NIL_CALLS, RULE_ID, RULE_VERSION, SNIPPET_MAX_LINES, SNIPPET_RADIUS, normalize_whitespace, sha256_hex
 from .config import ReviewConfig
 from .parsed_lua import ParsedLuaFile, SourceIndex, parse_lua_file
+from .ast_utils import iter_call_expressions, iter_statement_expression_roots
 
 NilState = str
 MISSING = object()
@@ -204,6 +205,7 @@ class LuaNilAnalyzer:
         env = {name: value.clone() for name, value in starting_env.items()}
         shadowed: dict[str, Any] = {}
         for statement in statements:
+            self._inspect_statement_sinks(statement, env, context, snippets_dir)
             if isinstance(statement, N.LocalFunction):
                 self._analyze_function(statement, self._name_for_function(statement.name), snippets_dir, captured_env=env)
                 if statement.name.id not in shadowed:
@@ -245,7 +247,6 @@ class LuaNilAnalyzer:
                 continue
 
             if isinstance(statement, N.Call):
-                self._inspect_call(statement, env, context, snippets_dir)
                 env = self._apply_post_call_narrowing(statement, env)
                 continue
 
@@ -376,12 +377,23 @@ class LuaNilAnalyzer:
             return right.id
         return None
 
+    def _inspect_statement_sinks(
+        self,
+        statement: Any,
+        env: dict[str, ValueInfo],
+        context: FunctionContext,
+        snippets_dir: Path,
+    ) -> None:
+        for root in iter_statement_expression_roots(statement):
+            for call in iter_call_expressions(root):
+                self._inspect_call(call, env, context, snippets_dir)
+
     def _inspect_call(self, statement: N.Call, env: dict[str, ValueInfo], context: FunctionContext, snippets_dir: Path) -> None:
         if self._qualified_name(statement.func) != "string.find" or not statement.args:
             return
         first_arg = statement.args[0]
         arg_info = self._eval_expression(first_arg, env)
-        if arg_info.nil_state not in {"nil", "maybe_nil"}:
+        if arg_info.nil_state == "non_nil":
             return
         line, column = self.source.line_column_for_node(statement)
         call_text = f"{self.source.node_text(statement.func)}({', '.join(self.source.node_text(arg) for arg in statement.args)})"
@@ -391,6 +403,11 @@ class LuaNilAnalyzer:
         finding_id = sha256_hex("|".join([RULE_ID, self.relative_path, context.function_anchor, str(line), normalize_whitespace(call_text), normalize_whitespace(arg_text)]))
         snippet_paths = self._write_snippets(finding_id, trace, snippets_dir)
         risk = self._risk_metadata(arg_info)
+        state_label = {
+            "nil": "is definitely",
+            "maybe_nil": "may be",
+            "unknown": "could not be proven non_nil and may still be",
+        }.get(arg_info.nil_state, "may be")
         finding = {
             "finding_id": finding_id,
             "rule_id": RULE_ID,
@@ -414,7 +431,7 @@ class LuaNilAnalyzer:
             "snippet_paths": snippet_paths,
             "needs_source_escalation": False,
             "suppressed": self._is_suppressed(finding_id, line),
-            "message": f"`string.find` first argument '{arg_text}' {'is definitely' if arg_info.nil_state == 'nil' else 'may be'} nil at this call site.",
+            "message": f"`string.find` first argument '{arg_text}' {state_label} nil at this call site.",
         }
         self.findings.append(finding)
 
@@ -634,6 +651,21 @@ class LuaNilAnalyzer:
                 "confidence": "high",
                 "default_human_review": True,
                 "trace_gate_required": False,
+            }
+        if info.nil_state == "unknown":
+            if info.origin_kind == "unknown_name":
+                category = "unresolved_name_unverified"
+            elif info.origin_kind == "unknown_expr":
+                category = "unknown_expression_unverified"
+            else:
+                category = "unknown_value_unverified"
+            return {
+                "risk_level": 3,
+                "risk_tier": "low",
+                "risk_category": category,
+                "confidence": "low",
+                "default_human_review": True,
+                "trace_gate_required": True,
             }
         if info.origin_kind == "function_return":
             return {
