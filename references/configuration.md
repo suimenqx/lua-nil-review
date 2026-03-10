@@ -14,18 +14,21 @@ The analyzer accepts a JSON config file with these keys:
     "enabled": true,
     "flatten_require_mode": "basename",
     "max_depth": 5,
-    "auto_silence_depth": 3,
     "min_required_trace_depth": 3,
     "max_branch_count": 16,
     "max_expanded_nodes": 64,
     "max_unique_slices": 12,
     "slice_mode": "logic_slice",
     "max_slice_lines": 60,
+    "agentic_retrace_enabled": true,
+    "agentic_retrace_depth_bonus": 4,
+    "agentic_retrace_max_branch_count": 32,
+    "agentic_retrace_max_expanded_nodes": 192,
+    "agentic_frontier_jump_limit": 4,
     "module_resolution_priority": ["src/ui", "src/common"],
     "module_resolution_overrides": {
       "config": ["src/ui/config.lua", "src/net/config.lua"]
-    },
-    "default_visible_risk_levels": [1, 2]
+    }
   },
   "suppressions": [
     {"file": "foo.lua", "line": 12, "rule_id": "lua.string-find-first-arg-nil"},
@@ -39,9 +42,24 @@ The analyzer accepts a JSON config file with these keys:
 
 - `Level 1 / high`: deterministic nil, including literal `nil` and local table reads that provably miss a key.
 - `Level 2 / medium`: local unguarded indexed reads such as `info.user.email`.
-- `Level 3 / low`: function-return findings that are unverified before symbol tracing.
+- `Level 3 / low`: function-return or parameter-origin findings that are unverified before symbol tracing.
 
-By default, only Levels `1` and `2` are human-visible before trace filtering. Level `3` findings must survive bounded tracing with a risky or mixed result before they become review shards.
+Evidence-based dismissal is the current default:
+
+- every unsuppressed finding is retained for review unless trace proves it safe
+- bounded tracing runs before sharding so CodeAgent can dismiss safe findings automatically
+- if a finding is still `uncertain` or `budget_exhausted`, CodeAgent runs one agentic retry before claim with a deeper trace budget and targeted frontier `jump` expansion
+- unresolved or uncertain Level `3` findings stay visible with their trace evidence instead of being hidden
+
+`auto_silence_depth` and `default_visible_risk_levels` are still accepted in config for fingerprint compatibility, but they do not override the evidence-based dismissal policy above.
+
+## Agentic Retrace Controls
+
+- `agentic_retrace_enabled`: run the pre-claim strategic retry for uncertain findings.
+- `agentic_retrace_depth_bonus`: how many extra trace levels the second pass receives.
+- `agentic_retrace_max_branch_count`: higher branch cap used only during the second pass.
+- `agentic_retrace_max_expanded_nodes`: higher node budget used only during the second pass.
+- `agentic_frontier_jump_limit`: how many uncertain frontier callsites get an automatic `jump` summary attached to the trace bundle.
 
 ## Scenario Resolution
 

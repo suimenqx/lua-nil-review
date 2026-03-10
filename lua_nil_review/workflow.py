@@ -42,7 +42,7 @@ from .state import (
 from .symbol_extractor import extract_file_symbols
 from .symbol_index import build_symbol_index, load_file_symbols_by_artifact
 from .symbol_query import candidate_slice_content
-from .tracer import TraceEngine, load_trace_bundle
+from .tracer import _trace_finding_with_strategy, load_trace_bundle
 
 
 def analysis_fingerprint(config: ReviewConfig) -> str:
@@ -233,9 +233,6 @@ def _active_findings(layout) -> tuple[list[dict[str, Any]], int]:
             if finding.get("suppressed") or finding.get("trace_auto_silenced") or finding.get("human_review_visible") is False:
                 suppressed += 1
                 continue
-            if finding.get("risk_level") == 3 and finding.get("trace_status") not in {"risky", "mixed"}:
-                suppressed += 1
-                continue
             active.append(finding)
     active.sort(key=lambda item: (item["file"], item["line"], item["finding_id"]))
     return active, suppressed
@@ -260,13 +257,15 @@ def _load_prepare_config(root: Path, manifest: dict[str, Any], explicit_config_p
 
 def _enrich_findings_with_traces(layout, root: Path, config: ReviewConfig) -> dict[str, int]:
     if not config.symbol_tracing.enabled:
-        return {"traced": 0, "auto_silenced": 0, "auto_filtered_low_confidence": 0, "escalated": 0, "visible_after_trace": 0, "level_1": 0, "level_2": 0, "level_3": 0}
-    engine = TraceEngine(root, layout, config)
+        return {"traced": 0, "auto_silenced": 0, "auto_filtered_low_confidence": 0, "escalated": 0, "visible_after_trace": 0, "level_1": 0, "level_2": 0, "level_3": 0, "agentic_retraced": 0, "agentic_improved": 0, "agentic_promoted_safe": 0, "agentic_frontier_jumps": 0}
     traced = 0
     silenced = 0
-    low_confidence_filtered = 0
     escalated = 0
     visible_after_trace = 0
+    agentic_retraced = 0
+    agentic_improved = 0
+    agentic_promoted_safe = 0
+    agentic_frontier_jumps = 0
     risk_counts = {1: 0, 2: 0, 3: 0}
     active_finding_ids: set[str] = set()
     for analysis_path in sorted(layout.analysis_dir.glob("*.json")):
@@ -298,15 +297,20 @@ def _enrich_findings_with_traces(layout, root: Path, config: ReviewConfig) -> di
                 finding["auto_filtered_reason"] = None
                 visible_after_trace += 1
                 continue
-            bundle = engine.trace_finding(finding)
+            bundle = _trace_finding_with_strategy(root=root, layout=layout, config=config, finding=finding)
             traced += 1
+            strategy = bundle.get("agentic_strategy", {})
+            if strategy.get("triggered"):
+                agentic_retraced += 1
+                if strategy.get("improved"):
+                    agentic_improved += 1
+                if strategy.get("retry_overall") == "safe" and strategy.get("initial_overall") in {"uncertain", "budget_exhausted"}:
+                    agentic_promoted_safe += 1
+            agentic_frontier_jumps += len(strategy.get("frontier_jumps", []))
             max_depth_used = max((node.get("depth", 0) for node in bundle.get("nodes", [])), default=0)
             auto_silenced = bundle.get("overall") == "safe" and not bundle.get("external_config_dependency")
-            low_confidence_hidden = bool(risk_level == 3 and bundle.get("overall") not in {"risky", "mixed"} and not auto_silenced)
             if auto_silenced:
                 silenced += 1
-            if low_confidence_hidden:
-                low_confidence_filtered += 1
             if bundle.get("needs_source_escalation"):
                 escalated += 1
             bundle["trace_auto_silenced"] = auto_silenced
@@ -318,6 +322,13 @@ def _enrich_findings_with_traces(layout, root: Path, config: ReviewConfig) -> di
             finding["trace_auto_silenced"] = auto_silenced
             finding["trace_branch_outcomes"] = bundle.get("branch_outcomes", [])
             finding["needs_source_escalation"] = bool(bundle.get("needs_source_escalation"))
+            finding["agentic_trace"] = {
+                "triggered": bool(strategy.get("triggered")),
+                "initial_overall": strategy.get("initial_overall"),
+                "retry_overall": strategy.get("retry_overall"),
+                "improved": bool(strategy.get("improved")),
+                "frontier_jump_count": len(strategy.get("frontier_jumps", [])),
+            }
             finding["trace_depth_policy"] = {
                 "min_required_trace_depth": config.symbol_tracing.min_required_trace_depth,
                 "configured_max_depth": config.symbol_tracing.max_depth,
@@ -325,13 +336,13 @@ def _enrich_findings_with_traces(layout, root: Path, config: ReviewConfig) -> di
                 "trace_gate_required": bool(finding.get("trace_gate_required")),
             }
             finding["trace_gate_passed"] = bool(
-                not finding.get("trace_gate_required") or bundle.get("overall") in {"risky", "mixed"}
+                not finding.get("trace_gate_required")
+                or bundle.get("overall") != "safe"
+                or bundle.get("external_config_dependency")
             )
-            finding["human_review_visible"] = not auto_silenced and not low_confidence_hidden
+            finding["human_review_visible"] = not auto_silenced
             if auto_silenced:
                 finding["auto_filtered_reason"] = "trace_safe"
-            elif low_confidence_hidden:
-                finding["auto_filtered_reason"] = "level3_unconfirmed_after_trace"
             else:
                 finding["auto_filtered_reason"] = None
             finding["trace_definition_slice_paths"] = [
@@ -351,12 +362,16 @@ def _enrich_findings_with_traces(layout, root: Path, config: ReviewConfig) -> di
     return {
         "traced": traced,
         "auto_silenced": silenced,
-        "auto_filtered_low_confidence": low_confidence_filtered,
+        "auto_filtered_low_confidence": 0,
         "escalated": escalated,
         "visible_after_trace": visible_after_trace,
         "level_1": risk_counts[1],
         "level_2": risk_counts[2],
         "level_3": risk_counts[3],
+        "agentic_retraced": agentic_retraced,
+        "agentic_improved": agentic_improved,
+        "agentic_promoted_safe": agentic_promoted_safe,
+        "agentic_frontier_jumps": agentic_frontier_jumps,
     }
 
 
@@ -632,6 +647,10 @@ def run_merge(*, root: Path, state_dir: Path, config_path: str | None) -> dict[s
                 "risk_level_2": int(trace_summary.get("level_2", 0)),
                 "risk_level_3": int(trace_summary.get("level_3", 0)),
                 "human_review_candidates": int(trace_summary.get("visible_after_trace", 0)),
+                "agentic_retraced": int(trace_summary.get("agentic_retraced", 0)),
+                "agentic_improved": int(trace_summary.get("agentic_improved", 0)),
+                "agentic_promoted_safe": int(trace_summary.get("agentic_promoted_safe", 0)),
+                "agentic_frontier_jumps": int(trace_summary.get("agentic_frontier_jumps", 0)),
             },
             "confirmed_findings": confirmed,
             "needs_source_escalation": escalated,
@@ -649,7 +668,11 @@ def run_merge(*, root: Path, state_dir: Path, config_path: str | None) -> dict[s
             f"- Needs source escalation: {summary['totals']['needs_source_escalation']}",
             f"- Pending shards: {summary['totals']['pending_shards']}",
             f"- Auto-filtered safe findings: {summary['totals']['auto_filtered_safe']}",
-            f"- Auto-filtered low-confidence call returns: {summary['totals']['auto_filtered_low_confidence']}",
+            f"- Legacy low-confidence auto-filter count: {summary['totals']['auto_filtered_low_confidence']}",
+            f"- Agentic retraces before claim: {summary['totals']['agentic_retraced']}",
+            f"- Agentic retraces that improved certainty: {summary['totals']['agentic_improved']}",
+            f"- Agentic retraces that proved safe: {summary['totals']['agentic_promoted_safe']}",
+            f"- Frontier jump expansions: {summary['totals']['agentic_frontier_jumps']}",
             f"- Risk level totals: L1={summary['totals']['risk_level_1']} L2={summary['totals']['risk_level_2']} L3={summary['totals']['risk_level_3']}",
             "",
         ]

@@ -20,6 +20,11 @@ class SymbolTracingConfig:
     max_unique_slices: int = 12
     slice_mode: str = "logic_slice"
     max_slice_lines: int = 60
+    agentic_retrace_enabled: bool = True
+    agentic_retrace_depth_bonus: int = 4
+    agentic_retrace_max_branch_count: int = 32
+    agentic_retrace_max_expanded_nodes: int = 192
+    agentic_frontier_jump_limit: int = 4
     module_resolution_overrides: dict[str, list[str]] = field(default_factory=dict)
     module_resolution_priority: list[str] = field(default_factory=list)
     default_visible_risk_levels: list[int] = field(default_factory=lambda: [1, 2])
@@ -37,6 +42,11 @@ class SymbolTracingConfig:
             "max_unique_slices": int(self.max_unique_slices),
             "slice_mode": self.slice_mode,
             "max_slice_lines": int(self.max_slice_lines),
+            "agentic_retrace_enabled": bool(self.agentic_retrace_enabled),
+            "agentic_retrace_depth_bonus": int(self.agentic_retrace_depth_bonus),
+            "agentic_retrace_max_branch_count": int(self.agentic_retrace_max_branch_count),
+            "agentic_retrace_max_expanded_nodes": int(self.agentic_retrace_max_expanded_nodes),
+            "agentic_frontier_jump_limit": int(self.agentic_frontier_jump_limit),
             "module_resolution_overrides": {
                 key: sorted(dict.fromkeys(paths))
                 for key, paths in sorted(self.module_resolution_overrides.items())

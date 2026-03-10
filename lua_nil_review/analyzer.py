@@ -641,13 +641,20 @@ class LuaNilAnalyzer:
                 "risk_tier": "low",
                 "risk_category": "function_return_unverified",
                 "confidence": "low",
-                "default_human_review": False,
+                "default_human_review": True,
+                "trace_gate_required": True,
+            }
+        if info.origin_kind == "parameter":
+            return {
+                "risk_level": 3,
+                "risk_tier": "low",
+                "risk_category": "parameter_unverified",
+                "confidence": "low",
+                "default_human_review": True,
                 "trace_gate_required": True,
             }
         if info.origin_kind == "field_read":
             category = "local_unguarded_index"
-        elif info.origin_kind == "parameter":
-            category = "unguarded_parameter"
         else:
             category = "local_maybe_nil"
         return {

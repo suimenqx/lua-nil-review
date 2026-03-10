@@ -6,6 +6,7 @@
 
 - 扫描 Lua 仓库里的 `string.find(arg1, ...)` 风险。
 - 自动做一部分跨函数追踪，尽量过滤噪音。
+- 对第一轮还不确定的问题，再做一轮更激进的策略化 `jump/trace` 扩展。
 - 把待处理问题切成小片段，而不是逼你一次读完整个大仓库。
 
 如果你只想尽快跑通，按本文一步一步做就可以。
@@ -156,6 +157,17 @@ python .codeagent/skills/lua-nil-review/scripts/run_review_cycle.py refresh
 - `prepare.suppressed_findings`
 - `prepare.trace_summary`
 
+### `trace_summary` 里先看什么
+
+如果你是第一次跑，优先看下面这些字段：
+
+- `auto_silenced`：已经被自动证明安全，所以不再进入人工队列的数量。
+- `visible_after_trace`：自动追踪结束后，仍然需要人工确认的数量。
+- `agentic_retraced`：有多少 `uncertain` finding 在 `claim` 前又被自动深挖了一轮。
+- `agentic_improved`：二次深挖后，有多少 finding 的确定性变高了。
+- `agentic_promoted_safe`：二次深挖后，又额外证明安全并静默掉了多少 finding。
+- `agentic_frontier_jumps`：自动对不确定 frontier 节点补跑了多少次 `jump`。
+
 ### 如何理解结果
 
 如果 `shards_total > 0`：
@@ -165,7 +177,7 @@ python .codeagent/skills/lua-nil-review/scripts/run_review_cycle.py refresh
 如果 `shards_total = 0`：
 
 - 可能真的没有问题。
-- 也可能是问题都被自动过滤了，比如 trace 证明安全。
+- 也可能是问题都被自动过滤了，比如 trace 或二次策略化 retrace 证明安全。
 
 这时可以去看：
 
@@ -291,8 +303,8 @@ CodeAgent 会先确认：
   例子：`local x = nil` 后传进 `string.find(x, ...)`
 - `Level 2`：本地未保护索引
   例子：`info.user.email`
-- `Level 3`：跨函数返回值，暂时还没证明安全或危险
-  例子：`local x = Utils.Get()`
+- `Level 3`：跨函数返回值或函数参数，暂时还没证明安全或危险
+  例子：`local x = Utils.Get()`，或者 `local function sink(name) string.find(name, ...) end`
 
 这一步的目的，是先把“明显危险”和“只是缺上下文”的问题分开。
 
@@ -304,8 +316,15 @@ CodeAgent 会先确认：
 
 - 自动跳到符号定义
 - 自动追踪函数返回路径
+- 如果 sink 参数来自函数形参，自动反向查 caller 传参链
 - 在冲突模块里分别看不同物理路径的结果
 - 生成 `trace_bundle`
+
+如果第一轮 trace 之后还是 `uncertain` 或 `budget_exhausted`，CodeAgent 在 `claim` 前还会再做一轮策略化扩展：
+
+- 放宽 trace 深度和节点预算
+- 对不确定 frontier callsite 再自动跑一次 `jump`
+- 把这轮补充证据一起写回 `trace_bundle`
 
 也就是说，像 `Utils.Get()` 这种情况，不会默认直接告诉你“请人工核实”，而是会先自己去查。
 
@@ -314,8 +333,13 @@ CodeAgent 会先确认：
 自动追踪之后，工具会继续做自动判定：
 
 - 如果 trace 证明安全：自动静默，不进人工队列
-- 如果是 `Level 3`，但 trace 后仍然没有证明 `risky/mixed`：默认不进人工队列
+- 如果 trace 后仍然不能证明安全：保留给人工，并把已有 trace 证据一起带上
 - 如果 trace 显示不同候选路径结果不同：保留分支证据，例如哪条路径安全、哪条路径危险
+
+你可以把它理解成：
+
+- 第一轮 trace：正常预算下的标准自动调查
+- 第二轮策略化扩展：为了尽量减少人工介入，再做一次“更深一点、更宽一点”的自动确认
 
 所以你最后看到的 shard，并不是“全量报警”，而是已经被自动筛过一轮的结果。
 
@@ -327,12 +351,14 @@ CodeAgent 会先确认：
 - `snippets`
 - `trace_bundle`
 - `trace_slices`
+- `agentic_trace`
 
 也就是说，CodeAgent 已经先完成了：
 
 - 初步定位
 - 风险分级
 - 自动跨函数追踪
+- 对不确定项做第二轮策略化 jump/trace 扩展
 - 自动过滤明显安全项
 - 多分支冲突展示
 
@@ -374,11 +400,11 @@ CodeAgent 会先确认：
 最常用的几个位置：
 
 - `artifacts/string-find-nil/analysis/*.json`
-  这里能看到 finding 的 `risk_level`、`risk_tier`、`human_review_visible`
+  这里能看到 finding 的 `risk_level`、`risk_tier`、`human_review_visible`、`agentic_trace`
 - `artifacts/string-find-nil/trace_bundles/*.json`
-  这里能看到自动 trace 的分支结果
+  这里能看到自动 trace 的分支结果，以及二次策略化扩展留下的 `agentic_strategy`
 - `artifacts/string-find-nil/manifest.json`
-  这里能看到 `trace_summary`
+  这里能看到 `trace_summary`，包括 `agentic_retraced` 这类统计
 - `artifacts/string-find-nil/final/summary.json`
   这里能看到最终汇总
 
@@ -411,8 +437,29 @@ python .codeagent/skills/lua-nil-review/scripts/run_review_cycle.py claim
 - `snippets`
 - `trace_bundle`
 - `trace_slices`
+- `agentic_trace`
 
 这些就是技能已经帮你缩小后的证据范围。
+
+### `agentic_trace` 是什么
+
+这是为了让你快速看懂“CodeAgent 在 claim 前又做了什么”。
+
+常见字段有：
+
+- `triggered`：是否触发了第二轮策略化扩展
+- `initial_overall`：第一轮 trace 的结论
+- `retry_overall`：第二轮扩展后的结论
+- `improved`：第二轮是否让结论更明确了
+- `frontier_jump_count`：二次扩展里补跑了多少次 `jump`
+
+如果你看到：
+
+- `triggered = true`
+- `initial_overall = "uncertain"`
+- `retry_overall = "safe"`
+
+通常就说明：这个问题本来第一轮没查清，但 CodeAgent 又继续查了一轮，并最终证明它安全，所以它可能不会再进入人工队列。
 
 ## 10. 第五步：填写 review JSON
 
@@ -519,6 +566,14 @@ python .codeagent/skills/lua-nil-review/scripts/run_review_cycle.py complete --r
 - `exclude`：跳过第三方目录，减少噪音和耗时。
 - `module_resolution_priority`：当 `require("config")` 这种名字在多个路径下都存在时，优先按你给的目录前缀解析。
 
+如果你后面想进一步调“claim 前自动深挖”的力度，可以再去看这些配置：
+
+- `agentic_retrace_enabled`
+- `agentic_retrace_depth_bonus`
+- `agentic_retrace_max_branch_count`
+- `agentic_retrace_max_expanded_nodes`
+- `agentic_frontier_jump_limit`
+
 如果你完全不确定怎么配，可以先不写配置，直接跑默认值。
 
 ## 14. 风险分级怎么理解
@@ -527,15 +582,19 @@ python .codeagent/skills/lua-nil-review/scripts/run_review_cycle.py complete --r
 
 - `Level 1`：确定性风险。比如直接传了 `nil`，或者本地 table 明确缺这个 key。
 - `Level 2`：本地上下文里看起来没有保护的索引访问。
-- `Level 3`：跨函数返回值，默认先不打扰人，先自动追踪。
+- `Level 3`：跨函数返回值或参数来源，先自动追踪，再决定能不能证明安全。
 
 新手最重要的理解是：
 
-### 不是所有“可能”都会扔给你
+### 不是所有“可能”都会直接留给你判断
 
 工具会先自动做 trace。
 
-只有那些 trace 之后仍然可疑的 `Level 3` 才会真正进入人工 review。
+如果第一次还不够，它还会自动再做一轮更激进的策略化扩展。
+
+只有那些被 trace 证明安全的 finding 才会自动静默。
+
+剩下没有被证明安全的 finding，即使只是低置信度，也会继续进入人工 review，并附带 trace 证据，避免因为上下文缺失而直接漏报。
 
 这就是为什么有时你能在 `analysis/` 里看到 finding，但 `claim` 却拿不到 shard。
 
@@ -604,7 +663,8 @@ python -m pip install -r requirements.txt
 - 没有 active finding。
 - finding 都被 suppress 了。
 - trace 已经自动证明安全并过滤了。
-- Level 3 finding 没 trace 成 `risky/mixed`，所以没进入人工队列。
+- 第一轮 trace 不够，但第二轮策略化 retrace 已经把剩余问题证明安全了。
+- 当前这轮里剩余 finding 都已经被确认安全，所以没有需要人工处理的 shard。
 
 先看：
 

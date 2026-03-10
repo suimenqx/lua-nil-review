@@ -34,8 +34,9 @@ If that path does not exist, resolve the installed skill location with `codeagen
 ## Rules
 
 - Review only direct `string.find(arg1, ...)` calls.
-- Risk tiering is enabled by default: deterministic nil is Level 1, local unguarded indexed reads are Level 2, and cross-function return values start as Level 3 until tracing proves risk.
-- Level 3 findings do not enter human review by default. The pipeline must trace them before deciding whether they stay visible.
+- Risk tiering is enabled by default: deterministic nil is Level 1, local unguarded indexed reads are Level 2, and unverified function returns or parameter-origin sinks start as Level 3.
+- The pipeline keeps every unsuppressed finding unless tracing proves it safe. Level 3 is a sorting hint, not a default hide rule.
+- Before `claim`, the workflow will automatically retry uncertain findings with a deeper agentic trace budget and attach frontier `jump` evidence when it can.
 - Treat `assert(x)` and configured `nil_guards` as narrowing `x` to `non_nil`.
 - Use `jump` and `trace` instead of free-reading the repository when a symbol or return path needs follow-up.
 - Keep the review high precision. If the evidence is incomplete, mark the finding as `needs_source_escalation` instead of free-reading a larger code region.

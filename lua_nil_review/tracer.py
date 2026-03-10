@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any
 
@@ -88,6 +88,7 @@ class TraceEngine:
         self._parsed_cache: dict[str, ParsedLuaFile] = {}
         self._function_scope_cache: dict[tuple[str, str], FunctionScope] = {}
         self._visited_calls: set[tuple[str, str]] = set()
+        self._visited_params: set[tuple[str, str, str]] = set()
 
     def trace_finding(self, finding: dict[str, Any]) -> dict[str, Any]:
         self._reset_trace_state()
@@ -159,6 +160,14 @@ class TraceEngine:
     def _reset_trace_state(self) -> None:
         self.recorder = TraceRecorder(max_expanded_nodes=self.config.symbol_tracing.max_expanded_nodes)
         self._visited_calls.clear()
+        self._visited_params.clear()
+
+    def _update_node(self, node_id: str, *, status: str, summary: str) -> None:
+        for node in self.recorder.nodes:
+            if node.get("node_id") == node_id:
+                node["status"] = status
+                node["summary"] = summary
+                return
 
     def _build_bundle(
         self,
@@ -272,6 +281,15 @@ class TraceEngine:
                 )
                 self.recorder.add_edge(parent_id, node_id, label="assignment")
                 return self._resolve_expr(scope, assignment["value"], before_line=assignment["line"], depth=depth + 1, parent_id=node_id)
+            if expr.id in scope.symbol.param_names:
+                return self._resolve_parameter_callers(
+                    scope,
+                    expr.id,
+                    before_line=before_line,
+                    depth=depth,
+                    parent_id=parent_id,
+                    line=line,
+                )
             node_id = self.recorder.add_node(kind="parameter_or_unknown", file=scope.file, line=line, expression=expr.id, depth=depth + 1, status="uncertain", summary=f"Name '{expr.id}' is unresolved in the local scope.")
             self.recorder.add_edge(parent_id, node_id, label="unknown")
             return [{"status": "uncertain", "summary": f"unresolved name {expr.id}"}]
@@ -285,6 +303,170 @@ class TraceEngine:
         node_id = self.recorder.add_node(kind="unknown_expr", file=scope.file, line=line, expression=text, depth=depth + 1, status="uncertain", summary=f"Unsupported expression {type(expr).__name__}.")
         self.recorder.add_edge(parent_id, node_id, label="unknown")
         return [{"status": "uncertain", "summary": type(expr).__name__}]
+
+    def _resolve_parameter_callers(
+        self,
+        scope: FunctionScope,
+        param_name: str,
+        *,
+        before_line: int,
+        depth: int,
+        parent_id: str | None,
+        line: int,
+    ) -> list[dict[str, Any]]:
+        node_id = self.recorder.add_node(
+            kind="parameter_origin_scan",
+            file=scope.file,
+            line=line,
+            expression=param_name,
+            depth=depth + 1,
+            status="pending",
+            summary=f"Tracing callers that supply parameter '{param_name}'.",
+        )
+        self.recorder.add_edge(parent_id, node_id, label="caller")
+        visit_key = (scope.file, scope.symbol.function_id, param_name)
+        if visit_key in self._visited_params:
+            self._update_node(node_id, status="uncertain", summary="Caller tracing hit a parameter cycle.")
+            return [{"status": "uncertain", "summary": f"recursive caller trace for parameter {param_name}"}]
+
+        callers = self.repository.incoming_call_edges(scope.symbol)
+        if not callers:
+            self._update_node(
+                node_id,
+                status="uncertain",
+                summary=f"No concrete callers were found for parameter '{param_name}'.",
+            )
+            return [{"status": "uncertain", "summary": f"no callers found for parameter {param_name}"}]
+
+        try:
+            self._visited_params.add(visit_key)
+            param_index = scope.symbol.param_names.index(param_name)
+            outcomes: list[dict[str, Any]] = []
+            for caller in callers[: self.config.symbol_tracing.max_branch_count]:
+                outcome = self._trace_parameter_from_caller(
+                    callee_scope=scope,
+                    param_name=param_name,
+                    param_index=param_index,
+                    caller=caller,
+                    depth=depth + 1,
+                    parent_id=node_id,
+                )
+                outcomes.append(outcome)
+            overall = _aggregate_status([item["status"] for item in outcomes])
+            self._update_node(
+                node_id,
+                status=overall,
+                summary=_trace_summary(overall, outcomes, budget_exhausted=False),
+            )
+            return outcomes
+        finally:
+            self._visited_params.discard(visit_key)
+
+    def _trace_parameter_from_caller(
+        self,
+        *,
+        callee_scope: FunctionScope,
+        param_name: str,
+        param_index: int,
+        caller: dict[str, Any],
+        depth: int,
+        parent_id: str,
+    ) -> dict[str, Any]:
+        caller_function = self.repository.function_symbol(caller["caller_file"], caller["caller_function_id"])
+        if caller_function is None:
+            branch_id = self.recorder.add_node(
+                kind="caller_branch",
+                file=caller["caller_file"],
+                line=int(caller["line"]),
+                expression=caller.get("callee_expr", ""),
+                depth=depth + 1,
+                status="uncertain",
+                summary="Caller symbol is missing from the repository.",
+            )
+            self.recorder.add_edge(parent_id, branch_id, label="caller")
+            return {
+                "status": "uncertain",
+                "summary": f"missing caller function {caller['caller_function_id']}",
+                "file": caller["caller_file"],
+                "line": int(caller["line"]),
+                "function_id": caller["caller_function_id"],
+                "qualified_name": caller.get("caller_qualified_name"),
+            }
+
+        caller_scope = self._function_scope(caller["caller_file"], caller_function)
+        branch_id = self.recorder.add_node(
+            kind="caller_branch",
+            file=caller_scope.file,
+            line=int(caller["line"]),
+            expression=caller.get("caller_qualified_name") or caller.get("callee_expr", ""),
+            depth=depth + 1,
+            status="pending",
+            summary=f"Following caller {caller_scope.file}:{caller['line']} for parameter '{param_name}'.",
+        )
+        self.recorder.add_edge(parent_id, branch_id, label="caller")
+        call_expr = self._locate_call_expression(
+            caller_scope.node,
+            int(caller["line"]),
+            caller["callee_expr"],
+            caller_scope.source,
+        )
+        if call_expr is None:
+            self._update_node(branch_id, status="uncertain", summary="Unable to reload the concrete caller callsite.")
+            return {
+                "status": "uncertain",
+                "summary": "caller callsite could not be reloaded",
+                "file": caller_scope.file,
+                "line": int(caller["line"]),
+                "function_id": caller_function.function_id,
+                "qualified_name": caller_function.qualified_name,
+            }
+
+        if param_index >= len(getattr(call_expr, "args", [])):
+            self._update_node(
+                branch_id,
+                status="risky",
+                summary=f"Caller omits argument {param_index + 1}, so parameter '{param_name}' becomes nil.",
+            )
+            return {
+                "status": "risky",
+                "summary": f"caller omits argument for parameter {param_name}",
+                "file": caller_scope.file,
+                "line": int(caller["line"]),
+                "function_id": caller_function.function_id,
+                "qualified_name": caller_function.qualified_name,
+            }
+
+        arg_expr = call_expr.args[param_index]
+        arg_text = normalize_whitespace(caller_scope.source.node_text(arg_expr))
+        arg_node_id = self.recorder.add_node(
+            kind="caller_argument",
+            file=caller_scope.file,
+            line=int(caller["line"]),
+            expression=arg_text,
+            depth=depth + 1,
+            status="pending",
+            summary=f"Tracing caller argument for parameter '{param_name}'.",
+        )
+        self.recorder.add_edge(branch_id, arg_node_id, label="arg")
+        branch_results = self._resolve_expr(
+            caller_scope,
+            arg_expr,
+            before_line=int(caller["line"]),
+            depth=depth + 1,
+            parent_id=arg_node_id,
+        )
+        status = _aggregate_status([item["status"] for item in branch_results])
+        summary = _trace_summary(status, branch_results, budget_exhausted=False)
+        self._update_node(branch_id, status=status, summary=summary)
+        self._update_node(arg_node_id, status=status, summary=summary)
+        return {
+            "status": status,
+            "summary": summary,
+            "file": caller_scope.file,
+            "line": int(caller["line"]),
+            "function_id": caller_function.function_id,
+            "qualified_name": caller_function.qualified_name,
+        }
 
     def _resolve_call(self, scope: FunctionScope, expr: Any, *, depth: int, parent_id: str | None) -> list[dict[str, Any]]:
         line, _column = scope.source.line_column_for_node(expr)
@@ -461,13 +643,19 @@ def trace_finding(
 ) -> dict[str, Any]:
     layout = build_layout(root, state_dir)
     config, _ = load_config(root, config_path)
-    engine = TraceEngine(root, layout, config)
     if expand_node:
         existing = _existing_bundle_for_expand(layout, finding_id=finding_id, file=file, line=line, expression=expression)
         if existing is not None:
             return _expand_bundle_node(existing, expand_node)
     if file and line is not None and expression:
-        bundle = engine.trace_callsite(file=file, line=line, expression=expression)
+        bundle = _trace_callsite_with_strategy(
+            root=root,
+            layout=layout,
+            config=config,
+            file=file,
+            line=line,
+            expression=expression,
+        )
         bundle_name = f"callsite-{file.replace('/', '__')}-{line}-{expression.replace('.', '_').replace(':', '_')}"
         atomic_write_json(layout.trace_bundles_dir / f"{bundle_name}.json", bundle)
         return {**bundle, "trace_bundle_path": f"trace_bundles/{bundle_name}.json", "expanded_node": expand_node}
@@ -475,7 +663,7 @@ def trace_finding(
     finding = _load_finding(layout, finding_id)
     if finding is None:
         raise RuntimeError(f"Unknown finding '{finding_id}'.")
-    bundle = engine.trace_finding(finding)
+    bundle = _trace_finding_with_strategy(root=root, layout=layout, config=config, finding=finding)
     bundle_path = layout.trace_bundles_dir / f"{finding_id}.json"
     atomic_write_json(bundle_path, bundle)
     return {
@@ -489,6 +677,195 @@ def load_trace_bundle(layout: StateLayout, finding_id: str) -> dict[str, Any] | 
     path = layout.trace_bundles_dir / f"{finding_id}.json"
     payload = load_json(path, default={})
     return payload if isinstance(payload, dict) and payload else None
+
+
+def _trace_finding_with_strategy(
+    *,
+    root: Path,
+    layout: StateLayout,
+    config: ReviewConfig,
+    finding: dict[str, Any],
+) -> dict[str, Any]:
+    engine = TraceEngine(root, layout, config)
+    initial_bundle = engine.trace_finding(finding)
+    return _apply_agentic_strategy(
+        root=root,
+        layout=layout,
+        config=config,
+        initial_bundle=initial_bundle,
+        finding=finding,
+    )
+
+
+def _trace_callsite_with_strategy(
+    *,
+    root: Path,
+    layout: StateLayout,
+    config: ReviewConfig,
+    file: str,
+    line: int,
+    expression: str,
+) -> dict[str, Any]:
+    engine = TraceEngine(root, layout, config)
+    initial_bundle = engine.trace_callsite(file=file, line=line, expression=expression)
+    return _apply_agentic_strategy(
+        root=root,
+        layout=layout,
+        config=config,
+        initial_bundle=initial_bundle,
+        file=file,
+        line=line,
+        expression=expression,
+    )
+
+
+def _apply_agentic_strategy(
+    *,
+    root: Path,
+    layout: StateLayout,
+    config: ReviewConfig,
+    initial_bundle: dict[str, Any],
+    finding: dict[str, Any] | None = None,
+    file: str | None = None,
+    line: int | None = None,
+    expression: str | None = None,
+) -> dict[str, Any]:
+    strategy = {
+        "enabled": bool(config.symbol_tracing.agentic_retrace_enabled),
+        "triggered": False,
+        "trigger_reason": None,
+        "initial_overall": initial_bundle.get("overall"),
+        "retry_overall": initial_bundle.get("overall"),
+        "improved": False,
+        "steps": [],
+        "frontier_jumps": [],
+        "initial_trace": {
+            "overall": initial_bundle.get("overall"),
+            "summary": initial_bundle.get("summary"),
+            "frontier_node_ids": list(initial_bundle.get("frontier_node_ids", [])),
+            "used_nodes": int(initial_bundle.get("budget", {}).get("used_nodes", 0)),
+        },
+    }
+    initial_bundle["agentic_strategy"] = strategy
+    if not strategy["enabled"] or initial_bundle.get("overall") not in {"uncertain", "budget_exhausted"}:
+        return initial_bundle
+
+    frontier_jumps = _frontier_jump_summaries(
+        root=root,
+        state_dir=layout.state_dir,
+        config=config,
+        bundle=initial_bundle,
+    )
+    if frontier_jumps:
+        strategy["frontier_jumps"] = frontier_jumps
+        strategy["steps"].append({"kind": "frontier_jump_scan", "jump_count": len(frontier_jumps)})
+
+    retry_config = _agentic_retry_config(config)
+    if retry_config is None:
+        return initial_bundle
+    strategy["triggered"] = True
+    strategy["trigger_reason"] = initial_bundle.get("overall")
+    strategy["steps"].insert(
+        0,
+        {
+            "kind": "retry_trace",
+            "max_depth": retry_config.symbol_tracing.max_depth,
+            "max_branch_count": retry_config.symbol_tracing.max_branch_count,
+            "max_expanded_nodes": retry_config.symbol_tracing.max_expanded_nodes,
+        },
+    )
+    retry_engine = TraceEngine(root, layout, retry_config)
+    if finding is not None:
+        retry_bundle = retry_engine.trace_finding(finding)
+    else:
+        retry_bundle = retry_engine.trace_callsite(file=file or "", line=int(line or 0), expression=expression or "")
+    strategy["retry_overall"] = retry_bundle.get("overall")
+    strategy["retry_trace"] = {
+        "overall": retry_bundle.get("overall"),
+        "summary": retry_bundle.get("summary"),
+        "frontier_node_ids": list(retry_bundle.get("frontier_node_ids", [])),
+        "used_nodes": int(retry_bundle.get("budget", {}).get("used_nodes", 0)),
+    }
+    strategy["improved"] = _status_rank(retry_bundle.get("overall")) > _status_rank(initial_bundle.get("overall"))
+    retry_bundle["agentic_strategy"] = strategy
+    return retry_bundle
+
+
+def _agentic_retry_config(config: ReviewConfig) -> ReviewConfig | None:
+    if not config.symbol_tracing.agentic_retrace_enabled:
+        return None
+    tracing = config.symbol_tracing
+    retry_tracing = replace(
+        tracing,
+        max_depth=max(int(tracing.max_depth), int(tracing.min_required_trace_depth)) + max(int(tracing.agentic_retrace_depth_bonus), 0),
+        max_branch_count=max(int(tracing.max_branch_count), int(tracing.agentic_retrace_max_branch_count)),
+        max_expanded_nodes=max(int(tracing.max_expanded_nodes), int(tracing.agentic_retrace_max_expanded_nodes)),
+    )
+    return replace(config, symbol_tracing=retry_tracing)
+
+
+def _frontier_jump_summaries(
+    *,
+    root: Path,
+    state_dir: Path,
+    config: ReviewConfig,
+    bundle: dict[str, Any],
+) -> list[dict[str, Any]]:
+    frontier_ids = list(bundle.get("frontier_node_ids", []))
+    if not frontier_ids:
+        return []
+    nodes_by_id = {
+        node.get("node_id"): node
+        for node in bundle.get("nodes", [])
+        if node.get("node_id")
+    }
+    results: list[dict[str, Any]] = []
+    seen: set[tuple[str, int, str]] = set()
+    for node_id in frontier_ids:
+        node = nodes_by_id.get(node_id)
+        if not node or node.get("kind") != "call_target":
+            continue
+        file = node.get("file")
+        line = node.get("line")
+        expression = node.get("expression")
+        if not file or line is None or not expression:
+            continue
+        key = (str(file), int(line), str(expression))
+        if key in seen:
+            continue
+        seen.add(key)
+        jump = jump_to_definition(
+            root=root,
+            state_dir=state_dir,
+            file=str(file),
+            line=int(line),
+            expression=str(expression),
+            config=config,
+            include_all=True,
+        )
+        results.append(
+            {
+                "node_id": node_id,
+                "file": str(file),
+                "line": int(line),
+                "expression": str(expression),
+                "resolution_kind": jump.get("resolution_kind"),
+                "external_config_dependency": bool(jump.get("external_config_dependency")),
+                "candidate_count": len(jump.get("candidates", [])),
+                "candidates": [
+                    {
+                        "file": item.get("file"),
+                        "qualified_name": item.get("qualified_name"),
+                        "slice_path": item.get("slice_path"),
+                        "return_state": (item.get("return_summary") or {}).get("state"),
+                    }
+                    for item in jump.get("candidates", [])
+                ],
+            }
+        )
+        if len(results) >= int(config.symbol_tracing.agentic_frontier_jump_limit):
+            break
+    return results
 
 
 def _load_finding(layout: StateLayout, finding_id: str) -> dict[str, Any] | None:
@@ -669,6 +1046,17 @@ def _aggregate_status(statuses: list[str]) -> str:
     if "mixed" in normalized:
         return "mixed"
     return "uncertain"
+
+
+def _status_rank(status: str | None) -> int:
+    order = {
+        "budget_exhausted": 0,
+        "uncertain": 1,
+        "mixed": 2,
+        "risky": 3,
+        "safe": 3,
+    }
+    return order.get(status or "", -1)
 
 
 def _branch_status_from_paths(statuses: list[str]) -> str:

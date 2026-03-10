@@ -12,7 +12,7 @@ The pipeline writes all durable state under `artifacts/string-find-nil/`.
 - `symbol_index/files/<file_id>.json`: per-file symbol facts
 - `symbol_index/modules/*.json`: collision-aware logical module index
 - `symbol_slices/*.txt`: cached function logic slices for jump and trace
-- `trace_bundles/<finding_id>.json`: persisted bounded trace results
+- `trace_bundles/<finding_id>.json`: persisted bounded trace results plus any pre-claim agentic retry metadata
 - `findings/<shard_id>.jsonl`: active review shards
 - `reviews/<shard_id>.json`: completed shard reviews
 - `final/summary.json` and `final/report.md`: merged outputs
@@ -52,7 +52,10 @@ If the skill is installed at user scope instead, resolve the actual install path
 ## Trace Gating
 
 - `prepare` enriches every unsuppressed `maybe_nil` finding with a persisted trace bundle before sharding.
-- Level `3` findings are not human-visible by default. They only enter shards when trace proves a `risky` or `mixed` branch.
+- Level `3` findings include unverified function returns and parameter-origin sinks. The tracer now follows both callee returns and caller argument chains within the configured budget.
+- If the first trace still ends in `uncertain` or `budget_exhausted`, `prepare` runs one more strategic pass before claim with a larger trace budget and frontier `jump` summaries attached to the trace bundle.
+- Any unsuppressed finding stays human-visible unless trace proves it safe and there is no unresolved external module dependency.
 - Safe traces are auto-silenced and counted in `manifest.json -> trace_summary -> auto_silenced`.
-- Unconfirmed Level `3` traces are auto-filtered and counted in `manifest.json -> trace_summary -> auto_filtered_low_confidence`.
+- `manifest.json -> trace_summary -> auto_filtered_low_confidence` is a legacy compatibility counter and should normally remain `0` under the evidence-based dismissal policy.
+- `manifest.json -> trace_summary` also records `agentic_retraced`, `agentic_improved`, `agentic_promoted_safe`, and `agentic_frontier_jumps`.
 - `final/report.md` surfaces collision branch outcomes as `[path] -> status` lines so scenario-dependent results stay explicit.

@@ -259,8 +259,8 @@ class SymbolTracingTestCase(unittest.TestCase):
         )
 
         refresh = self.run_wrapper("refresh")
-        self.assertEqual(1, refresh["prepare"]["trace_summary"]["auto_filtered_low_confidence"])
-        self.assertEqual(3, refresh["prepare"]["trace_summary"]["visible_after_trace"])
+        self.assertEqual(0, refresh["prepare"]["trace_summary"]["auto_filtered_low_confidence"])
+        self.assertEqual(4, refresh["prepare"]["trace_summary"]["visible_after_trace"])
 
         findings_by_line = {finding["line"]: finding for finding in self.load_analysis_findings()}
         self.assertEqual(1, findings_by_line[4]["risk_level"])
@@ -271,8 +271,9 @@ class SymbolTracingTestCase(unittest.TestCase):
         self.assertEqual("local_unguarded_index", findings_by_line[12]["risk_category"])
         self.assertEqual(3, findings_by_line[16]["risk_level"])
         self.assertEqual("function_return_unverified", findings_by_line[16]["risk_category"])
-        self.assertFalse(findings_by_line[16]["human_review_visible"])
-        self.assertEqual("level3_unconfirmed_after_trace", findings_by_line[16]["auto_filtered_reason"])
+        self.assertTrue(findings_by_line[16]["human_review_visible"])
+        self.assertIsNone(findings_by_line[16]["auto_filtered_reason"])
+        self.assertEqual("uncertain", findings_by_line[16]["trace_status"])
 
     def test_level3_risky_return_survives_trace_gate(self) -> None:
         self.write_file(
@@ -292,6 +293,133 @@ class SymbolTracingTestCase(unittest.TestCase):
         self.assertEqual(3, finding["risk_level"])
         self.assertEqual("risky", finding["trace_status"])
         self.assertTrue(finding["trace_gate_passed"])
+        self.assertTrue(finding["human_review_visible"])
+
+    def test_agentic_retrace_promotes_uncertain_chain_before_claim(self) -> None:
+        self.write_config(
+            {
+                "symbol_tracing": {
+                    "max_depth": 2,
+                    "max_expanded_nodes": 8,
+                    "agentic_retrace_depth_bonus": 8,
+                    "agentic_retrace_max_expanded_nodes": 96,
+                }
+            }
+        )
+        self.write_file(
+            "main.lua",
+            "local function leaf(name)\n"
+            "  return name or ''\n"
+            "end\n"
+            "local function middle(name)\n"
+            "  return leaf(name)\n"
+            "end\n"
+            "local function top(name)\n"
+            "  return middle(name)\n"
+            "end\n"
+            "local function demo(name)\n"
+            "  local value = top(name)\n"
+            "  string.find(value, 'a')\n"
+            "end\n",
+        )
+
+        refresh = self.run_wrapper("refresh", "--config", str(self.repo / ".lua-nil-review.json"))
+        self.assertEqual(0, refresh["prepare"]["shards_total"])
+        self.assertEqual(1, refresh["prepare"]["trace_summary"]["agentic_retraced"])
+        self.assertEqual(1, refresh["prepare"]["trace_summary"]["agentic_improved"])
+        self.assertEqual(1, refresh["prepare"]["trace_summary"]["agentic_promoted_safe"])
+
+        finding = self.load_analysis_findings()[0]
+        self.assertEqual("safe", finding["trace_status"])
+        self.assertTrue(finding["trace_auto_silenced"])
+        self.assertTrue(finding["agentic_trace"]["triggered"])
+        self.assertTrue(finding["agentic_trace"]["improved"])
+
+        bundle_path = self.state_dir / finding["trace_bundle_path"]
+        bundle = json.loads(bundle_path.read_text(encoding="utf-8"))
+        self.assertTrue(bundle["agentic_strategy"]["triggered"])
+        self.assertEqual("safe", bundle["agentic_strategy"]["retry_overall"])
+        self.assertIn(bundle["agentic_strategy"]["initial_overall"], {"uncertain", "budget_exhausted"})
+
+    def test_agentic_strategy_records_frontier_jump_expansions_for_uncertain_calls(self) -> None:
+        self.write_file(
+            "main.lua",
+            "local function demo()\n"
+            "  local value = fetch_name()\n"
+            "  string.find(value, 'a')\n"
+            "end\n",
+        )
+
+        refresh = self.run_wrapper("refresh")
+        self.assertEqual(1, refresh["prepare"]["trace_summary"]["agentic_retraced"])
+        self.assertGreaterEqual(refresh["prepare"]["trace_summary"]["agentic_frontier_jumps"], 1)
+        finding = self.load_analysis_findings()[0]
+        bundle_path = self.state_dir / finding["trace_bundle_path"]
+        bundle = json.loads(bundle_path.read_text(encoding="utf-8"))
+        strategy = bundle["agentic_strategy"]
+        self.assertTrue(strategy["triggered"])
+        self.assertGreaterEqual(len(strategy["frontier_jumps"]), 1)
+        self.assertEqual("fetch_name", strategy["frontier_jumps"][0]["expression"])
+        self.assertEqual(0, strategy["frontier_jumps"][0]["candidate_count"])
+
+    def test_parameter_without_callers_stays_visible_until_proven_safe(self) -> None:
+        self.write_file(
+            "main.lua",
+            "local function sink(name)\n"
+            "  string.find(name, 'a')\n"
+            "end\n",
+        )
+
+        refresh = self.run_wrapper("refresh")
+        self.assertEqual(1, refresh["prepare"]["shards_total"])
+        finding = self.load_analysis_findings()[0]
+        self.assertEqual(3, finding["risk_level"])
+        self.assertEqual("parameter_unverified", finding["risk_category"])
+        self.assertEqual("uncertain", finding["trace_status"])
+        self.assertFalse(finding["trace_auto_silenced"])
+        self.assertTrue(finding["human_review_visible"])
+
+    def test_parameter_trace_auto_silences_only_when_caller_chain_is_safe(self) -> None:
+        self.write_file(
+            "main.lua",
+            "local function sink(name)\n"
+            "  string.find(name, 'a')\n"
+            "end\n"
+            "local function forward(name)\n"
+            "  sink(name)\n"
+            "end\n"
+            "local function demo()\n"
+            "  forward('alice')\n"
+            "end\n",
+        )
+
+        refresh = self.run_wrapper("refresh")
+        self.assertEqual(0, refresh["prepare"]["shards_total"])
+        self.assertEqual(1, refresh["prepare"]["trace_summary"]["auto_silenced"])
+        finding = self.load_analysis_findings()[0]
+        self.assertEqual("safe", finding["trace_status"])
+        self.assertTrue(finding["trace_auto_silenced"])
+        self.assertFalse(finding["human_review_visible"])
+
+    def test_parameter_trace_keeps_mixed_callers_visible(self) -> None:
+        self.write_file(
+            "main.lua",
+            "local function sink(name)\n"
+            "  string.find(name, 'a')\n"
+            "end\n"
+            "local function safe()\n"
+            "  sink('alice')\n"
+            "end\n"
+            "local function unsafe()\n"
+            "  sink()\n"
+            "end\n",
+        )
+
+        refresh = self.run_wrapper("refresh")
+        self.assertEqual(1, refresh["prepare"]["shards_total"])
+        finding = self.load_analysis_findings()[0]
+        self.assertEqual("mixed", finding["trace_status"])
+        self.assertFalse(finding["trace_auto_silenced"])
         self.assertTrue(finding["human_review_visible"])
 
     def test_priority_prefix_selects_scenario_candidate(self) -> None:
