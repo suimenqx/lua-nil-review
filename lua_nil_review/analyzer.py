@@ -396,7 +396,7 @@ class LuaNilAnalyzer:
         if arg_info.nil_state == "non_nil":
             return
         line, column = self.source.line_column_for_node(statement)
-        call_text = f"{self.source.node_text(statement.func)}({', '.join(self.source.node_text(arg) for arg in statement.args)})"
+        call_text = self.source.node_text(statement) or f"{self.source.node_text(statement.func)}({', '.join(self.source.node_text(arg) for arg in statement.args)})"
         arg_text = self.source.node_text(first_arg)
         trace = self._compact_trace(arg_info.trace)
         trace.append(EvidenceEvent(kind="sink", state=arg_info.nil_state, message=f"`string.find` receives '{arg_text}' as its first argument.", line=line, column=column, code=self.source.line_text(line)))

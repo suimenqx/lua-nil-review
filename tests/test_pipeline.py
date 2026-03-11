@@ -183,6 +183,19 @@ class PipelineTestCase(unittest.TestCase):
         self.assertEqual("analyzed", second_index["a.lua"]["analysis_status"])
         self.assertEqual("reused", second_index["b.lua"]["analysis_status"])
 
+    def test_returned_string_find_call_is_detected(self) -> None:
+        self.write_file(
+            "returned.lua",
+            "local function demo()\n  local y = nil\n  return string.find(y, 'a')\nend\n",
+        )
+
+        self.analyze()
+        findings = self.load_all_findings()
+        self.assertEqual(1, len(findings))
+        self.assertEqual("returned.lua", findings[0]["file"])
+        self.assertEqual("nil", findings[0]["nil_state"])
+        self.assertIn("string.find", findings[0]["call_text"])
+
     def test_stale_in_review_shard_is_reclaimed(self) -> None:
         self.write_file("sample.lua", "local function demo()\n  local y = nil\n  string.find(y, 'a')\nend\n")
         self.analyze()
