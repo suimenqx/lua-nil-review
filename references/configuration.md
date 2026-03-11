@@ -125,6 +125,7 @@ Valid decisions for MVP are `confirm`, `dismiss`, and `needs_source_escalation`.
 - `final/report.md` is the human-readable review output.
 - `suppressed` findings stay in per-file analysis artifacts but do not become review shards.
 - `analysis/<file_id>.json` stores `risk_level`, `risk_tier`, `human_review_visible`, and direct investigation fields such as `candidate_summary`, `candidate_count`, `top_candidate_paths`, `scenario_branches`, `why_still_uncertain`, and `investigation_leads`.
+- A trace failure on one finding is stored inline as `trace_status=trace_error` plus `trace_error_message`; it no longer aborts the whole prepare phase.
 - `trace_bundles/<finding_id>.json` stores bounded cross-function trace output, frontier leads, and pre-claim agentic retry metadata for active findings.
 - `trace_bundles/callsite-*.json` stores direct callsite trace output triggered via `trace --file/--line/--expr`.
 - `symbol_index/` stores per-file symbol facts and aggregated module collision data.

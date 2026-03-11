@@ -69,5 +69,6 @@ If the skill is installed at user scope instead, resolve the actual install path
 - While `stage=sharding`, `manifest.json -> prepare_progress` tells you whether the workflow is still in `trace_enrichment` or has moved to `building_shards`. It is normal for `shards_total` to remain `0` until trace enrichment finishes.
 - While `stage=analyzing`, `manifest.json -> analyze_progress` gives more than file counts: `analyzed_files`, `reused_files`, `findings_discovered`, `parse_errors`, `current_file`, and `recent_findings` all refresh during the scan.
 - During `trace_enrichment`, `manifest.json -> trace_summary`, `candidate_overview`, and `finding_preview` now refresh incrementally instead of waiting for the whole prepare phase to finish.
+- If one finding cannot be retraced, `prepare` now isolates that failure as `trace_status=trace_error` with `trace_error_message`, keeps the finding human-visible, and continues processing the rest of the repository.
 - Every visible finding now carries explicit investigation fields: `candidate_summary`, `candidate_count`, `top_candidate_paths`, `scenario_branches`, `why_still_uncertain`, and `investigation_leads`.
 - `final/report.md` surfaces collision branch outcomes as `[path] -> status` lines so scenario-dependent results stay explicit.

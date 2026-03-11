@@ -210,6 +210,45 @@ class PipelineTestCase(unittest.TestCase):
         self.assertIn("shards", manifest)
         self.assertGreaterEqual(manifest["shards_total"], 1)
 
+    def test_prepare_isolates_trace_errors_and_continues(self) -> None:
+        self.write_file(
+            "trace_break.lua",
+            "local function demo(name)\n"
+            "  return string.find(name, 'a')\n"
+            "end\n",
+        )
+        self.write_file(
+            "stable.lua",
+            "local function demo()\n"
+            "  local y = nil\n"
+            "  string.find(y, 'b')\n"
+            "end\n",
+        )
+        self.analyze()
+        self.write_file(
+            "trace_break.lua",
+            "local function demo(name)\n"
+            "  return name\n"
+            "end\n",
+        )
+
+        prepared = self.prepare()
+        self.assertEqual(1, prepared["trace_summary"]["trace_errors"])
+        self.assertEqual(1, prepared["shards_total"])
+
+        findings = {finding["file"]: finding for finding in self.load_all_findings()}
+        broken = findings["trace_break.lua"]
+        self.assertEqual("trace_error", broken["trace_status"])
+        self.assertTrue(broken["trace_error"])
+        self.assertIn("Unable to locate sink call", broken["trace_error_message"])
+        self.assertTrue(broken["needs_source_escalation"])
+        self.assertTrue(broken["human_review_visible"])
+        self.assertIn("Trace failed before candidate branches could be reconstructed", broken["candidate_summary"])
+
+        stable = findings["stable.lua"]
+        self.assertEqual("risky", stable["trace_status"])
+        self.assertFalse(stable.get("trace_error", False))
+
     def test_large_file_shards_use_short_snippets_and_merge(self) -> None:
         lines = [f"-- filler {index}" for index in range(1, 3201)]
         lines[3098] = "local function giant()"

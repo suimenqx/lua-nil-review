@@ -455,6 +455,7 @@ CodeAgent 会先确认：
 
 - `artifacts/string-find-nil/analysis/*.json`
   这里能看到 finding 的 `risk_level`、`risk_tier`、`human_review_visible`、`agentic_trace`，以及 `candidate_summary / scenario_branches / why_still_uncertain`
+- 如果某条 trace 本身失败，这里还会看到 `trace_status = "trace_error"` 和 `trace_error_message`。这表示这条 finding 需要人工接手，但不会再把整轮 `prepare` 直接打断。
 - `artifacts/string-find-nil/trace_bundles/*.json`
   这里能看到自动 trace 的分支结果、frontier leads，以及二次策略化扩展留下的 `agentic_strategy`
 - `artifacts/string-find-nil/manifest.json`

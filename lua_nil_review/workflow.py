@@ -545,6 +545,7 @@ def _running_trace_summary(
     escalated: int,
     visible_after_trace: int,
     risk_counts: dict[int, int],
+    trace_errors: int,
     agentic_retraced: int,
     agentic_improved: int,
     agentic_promoted_safe: int,
@@ -559,6 +560,7 @@ def _running_trace_summary(
         "level_1": risk_counts[1],
         "level_2": risk_counts[2],
         "level_3": risk_counts[3],
+        "trace_errors": trace_errors,
         "agentic_retraced": agentic_retraced,
         "agentic_improved": agentic_improved,
         "agentic_promoted_safe": agentic_promoted_safe,
@@ -568,7 +570,7 @@ def _running_trace_summary(
 
 def _enrich_findings_with_traces(layout, root: Path, config: ReviewConfig, manifest: dict[str, Any], owner: str) -> dict[str, int]:
     if not config.symbol_tracing.enabled:
-        return {"traced": 0, "auto_silenced": 0, "auto_filtered_low_confidence": 0, "escalated": 0, "visible_after_trace": 0, "level_1": 0, "level_2": 0, "level_3": 0, "agentic_retraced": 0, "agentic_improved": 0, "agentic_promoted_safe": 0, "agentic_frontier_jumps": 0}
+        return {"traced": 0, "auto_silenced": 0, "auto_filtered_low_confidence": 0, "escalated": 0, "visible_after_trace": 0, "level_1": 0, "level_2": 0, "level_3": 0, "trace_errors": 0, "agentic_retraced": 0, "agentic_improved": 0, "agentic_promoted_safe": 0, "agentic_frontier_jumps": 0}
     findings_total, trace_candidates_total = _count_prepare_candidates(layout)
     progress = default_prepare_progress()
     progress["phase"] = "trace_enrichment"
@@ -579,6 +581,7 @@ def _enrich_findings_with_traces(layout, root: Path, config: ReviewConfig, manif
     silenced = 0
     escalated = 0
     visible_after_trace = 0
+    trace_errors = 0
     agentic_retraced = 0
     agentic_improved = 0
     agentic_promoted_safe = 0
@@ -600,6 +603,7 @@ def _enrich_findings_with_traces(layout, root: Path, config: ReviewConfig, manif
                 finding["human_review_visible"] = False
                 finding["auto_filtered_reason"] = "suppressed"
                 _apply_investigation_summary(finding)
+                changed = True
                 continue
             progress["current_finding_id"] = finding.get("finding_id")
             progress["current_file"] = finding.get("file")
@@ -630,6 +634,7 @@ def _enrich_findings_with_traces(layout, root: Path, config: ReviewConfig, manif
                     escalated=escalated,
                     visible_after_trace=visible_after_trace,
                     risk_counts=risk_counts,
+                    trace_errors=trace_errors,
                     agentic_retraced=agentic_retraced,
                     agentic_improved=agentic_improved,
                     agentic_promoted_safe=agentic_promoted_safe,
@@ -638,80 +643,121 @@ def _enrich_findings_with_traces(layout, root: Path, config: ReviewConfig, manif
                 manifest["candidate_overview"] = _candidate_overview(visible_preview, manifest["trace_summary"])
                 manifest["finding_preview"] = _finding_preview_entries(visible_preview)
                 _save_prepare_progress(layout, manifest, owner, progress)
+                changed = True
                 continue
-            bundle = _trace_finding_with_strategy(root=root, layout=layout, config=config, finding=finding)
-            traced += 1
-            progress["trace_candidates_done"] += 1
-            strategy = bundle.get("agentic_strategy", {})
-            if strategy.get("triggered"):
-                agentic_retraced += 1
-                if strategy.get("improved"):
-                    agentic_improved += 1
-                if strategy.get("retry_overall") == "safe" and strategy.get("initial_overall") in {"uncertain", "budget_exhausted"}:
-                    agentic_promoted_safe += 1
-            agentic_frontier_jumps += len(strategy.get("frontier_jumps", []))
-            max_depth_used = max((node.get("depth", 0) for node in bundle.get("nodes", [])), default=0)
-            auto_silenced = bundle.get("overall") == "safe" and not bundle.get("external_config_dependency")
-            if auto_silenced:
-                silenced += 1
-            if bundle.get("needs_source_escalation"):
-                escalated += 1
-            bundle["trace_auto_silenced"] = auto_silenced
-            bundle["max_depth_used"] = max_depth_used
-            atomic_write_json(layout.trace_bundles_dir / f"{finding['finding_id']}.json", bundle)
-            finding["trace_status"] = bundle.get("overall")
-            finding["trace_summary"] = bundle.get("summary")
-            finding["trace_bundle_path"] = f"trace_bundles/{finding['finding_id']}.json"
-            finding["trace_auto_silenced"] = auto_silenced
-            finding["trace_branch_outcomes"] = bundle.get("branch_outcomes", [])
-            finding["needs_source_escalation"] = bool(bundle.get("needs_source_escalation"))
-            finding["agentic_trace"] = {
-                "triggered": bool(strategy.get("triggered")),
-                "initial_overall": strategy.get("initial_overall"),
-                "retry_overall": strategy.get("retry_overall"),
-                "improved": bool(strategy.get("improved")),
-                "frontier_jump_count": len(strategy.get("frontier_jumps", [])),
-            }
-            finding["trace_depth_policy"] = {
-                "min_required_trace_depth": config.symbol_tracing.min_required_trace_depth,
-                "configured_max_depth": config.symbol_tracing.max_depth,
-                "max_depth_used": max_depth_used,
-                "trace_gate_required": bool(finding.get("trace_gate_required")),
-            }
-            finding["trace_gate_passed"] = bool(
-                not finding.get("trace_gate_required")
-                or bundle.get("overall") != "safe"
-                or bundle.get("external_config_dependency")
-            )
-            finding["human_review_visible"] = not auto_silenced
-            if auto_silenced:
-                finding["auto_filtered_reason"] = "trace_safe"
-            else:
+            try:
+                bundle = _trace_finding_with_strategy(root=root, layout=layout, config=config, finding=finding)
+                traced += 1
+                progress["trace_candidates_done"] += 1
+                strategy = bundle.get("agentic_strategy", {})
+                if strategy.get("triggered"):
+                    agentic_retraced += 1
+                    if strategy.get("improved"):
+                        agentic_improved += 1
+                    if strategy.get("retry_overall") == "safe" and strategy.get("initial_overall") in {"uncertain", "budget_exhausted"}:
+                        agentic_promoted_safe += 1
+                agentic_frontier_jumps += len(strategy.get("frontier_jumps", []))
+                max_depth_used = max((node.get("depth", 0) for node in bundle.get("nodes", [])), default=0)
+                auto_silenced = bundle.get("overall") == "safe" and not bundle.get("external_config_dependency")
+                if auto_silenced:
+                    silenced += 1
+                if bundle.get("needs_source_escalation"):
+                    escalated += 1
+                bundle["trace_auto_silenced"] = auto_silenced
+                bundle["max_depth_used"] = max_depth_used
+                atomic_write_json(layout.trace_bundles_dir / f"{finding['finding_id']}.json", bundle)
+                finding["trace_status"] = bundle.get("overall")
+                finding["trace_summary"] = bundle.get("summary")
+                finding["trace_bundle_path"] = f"trace_bundles/{finding['finding_id']}.json"
+                finding["trace_auto_silenced"] = auto_silenced
+                finding["trace_branch_outcomes"] = bundle.get("branch_outcomes", [])
+                finding["needs_source_escalation"] = bool(bundle.get("needs_source_escalation"))
+                finding["trace_error"] = False
+                finding["trace_error_message"] = None
+                finding["agentic_trace"] = {
+                    "triggered": bool(strategy.get("triggered")),
+                    "initial_overall": strategy.get("initial_overall"),
+                    "retry_overall": strategy.get("retry_overall"),
+                    "improved": bool(strategy.get("improved")),
+                    "frontier_jump_count": len(strategy.get("frontier_jumps", [])),
+                }
+                finding["trace_depth_policy"] = {
+                    "min_required_trace_depth": config.symbol_tracing.min_required_trace_depth,
+                    "configured_max_depth": config.symbol_tracing.max_depth,
+                    "max_depth_used": max_depth_used,
+                    "trace_gate_required": bool(finding.get("trace_gate_required")),
+                }
+                finding["trace_gate_passed"] = bool(
+                    not finding.get("trace_gate_required")
+                    or bundle.get("overall") != "safe"
+                    or bundle.get("external_config_dependency")
+                )
+                finding["human_review_visible"] = not auto_silenced
+                if auto_silenced:
+                    finding["auto_filtered_reason"] = "trace_safe"
+                else:
+                    finding["auto_filtered_reason"] = None
+                finding["trace_definition_slice_paths"] = [
+                    item.get("slice_path")
+                    for item in bundle.get("branch_outcomes", [])
+                    if item.get("slice_path")
+                ][: config.symbol_tracing.max_unique_slices]
+                _apply_investigation_summary(finding, bundle)
+                if finding["human_review_visible"]:
+                    visible_after_trace += 1
+                    visible_preview.append(finding)
+            except Exception as exc:
+                trace_errors += 1
+                progress["trace_candidates_done"] += 1
+                finding["trace_status"] = "trace_error"
+                finding["trace_summary"] = "Trace failed before the sink could be fully reconstructed."
+                finding["trace_bundle_path"] = None
+                finding["trace_auto_silenced"] = False
+                finding["trace_branch_outcomes"] = []
+                finding["needs_source_escalation"] = True
+                finding["trace_error"] = True
+                finding["trace_error_message"] = str(exc)
+                finding["agentic_trace"] = {
+                    "triggered": False,
+                    "initial_overall": "trace_error",
+                    "retry_overall": "trace_error",
+                    "improved": False,
+                    "frontier_jump_count": 0,
+                }
+                finding["trace_depth_policy"] = {
+                    "min_required_trace_depth": config.symbol_tracing.min_required_trace_depth,
+                    "configured_max_depth": config.symbol_tracing.max_depth,
+                    "max_depth_used": 0,
+                    "trace_gate_required": bool(finding.get("trace_gate_required")),
+                }
+                finding["trace_gate_passed"] = False
+                finding["human_review_visible"] = True
                 finding["auto_filtered_reason"] = None
-            finding["trace_definition_slice_paths"] = [
-                item.get("slice_path")
-                for item in bundle.get("branch_outcomes", [])
-                if item.get("slice_path")
-            ][: config.symbol_tracing.max_unique_slices]
-            _apply_investigation_summary(finding, bundle)
-            if finding["human_review_visible"]:
+                finding["trace_definition_slice_paths"] = []
+                finding["candidate_summary"] = "Trace failed before candidate branches could be reconstructed. Manual review is required for this finding."
+                finding["candidate_count"] = 0
+                finding["top_candidate_paths"] = []
+                finding["scenario_branches"] = []
+                finding["why_still_uncertain"] = str(exc)
+                finding["investigation_leads"] = []
                 visible_after_trace += 1
+                visible_preview.append(finding)
             progress["findings_done"] += 1
             progress["visible_after_trace"] = visible_after_trace
             progress["auto_silenced"] = silenced
+            progress["trace_errors"] = trace_errors
             progress["agentic_retraced"] = agentic_retraced
             progress["agentic_improved"] = agentic_improved
             progress["agentic_promoted_safe"] = agentic_promoted_safe
             progress["agentic_frontier_jumps"] = agentic_frontier_jumps
             progress["current_candidate_summary"] = finding.get("candidate_summary")
-            if finding["human_review_visible"]:
-                visible_preview.append(finding)
             manifest["trace_summary"] = _running_trace_summary(
                 traced=traced,
                 silenced=silenced,
                 escalated=escalated,
                 visible_after_trace=visible_after_trace,
                 risk_counts=risk_counts,
+                trace_errors=trace_errors,
                 agentic_retraced=agentic_retraced,
                 agentic_improved=agentic_improved,
                 agentic_promoted_safe=agentic_promoted_safe,
@@ -733,6 +779,7 @@ def _enrich_findings_with_traces(layout, root: Path, config: ReviewConfig, manif
         escalated=escalated,
         visible_after_trace=visible_after_trace,
         risk_counts=risk_counts,
+        trace_errors=trace_errors,
         agentic_retraced=agentic_retraced,
         agentic_improved=agentic_improved,
         agentic_promoted_safe=agentic_promoted_safe,
@@ -1056,6 +1103,7 @@ def run_merge(*, root: Path, state_dir: Path, config_path: str | None) -> dict[s
                 "risk_level_2": int(trace_summary.get("level_2", 0)),
                 "risk_level_3": int(trace_summary.get("level_3", 0)),
                 "human_review_candidates": int(trace_summary.get("visible_after_trace", 0)),
+                "trace_errors": int(trace_summary.get("trace_errors", 0)),
                 "agentic_retraced": int(trace_summary.get("agentic_retraced", 0)),
                 "agentic_improved": int(trace_summary.get("agentic_improved", 0)),
                 "agentic_promoted_safe": int(trace_summary.get("agentic_promoted_safe", 0)),
@@ -1078,6 +1126,7 @@ def run_merge(*, root: Path, state_dir: Path, config_path: str | None) -> dict[s
             f"- Pending shards: {summary['totals']['pending_shards']}",
             f"- Auto-filtered safe findings: {summary['totals']['auto_filtered_safe']}",
             f"- Legacy low-confidence auto-filter count: {summary['totals']['auto_filtered_low_confidence']}",
+            f"- Trace errors isolated during prepare: {summary['totals']['trace_errors']}",
             f"- Agentic retraces before claim: {summary['totals']['agentic_retraced']}",
             f"- Agentic retraces that improved certainty: {summary['totals']['agentic_improved']}",
             f"- Agentic retraces that proved safe: {summary['totals']['agentic_promoted_safe']}",

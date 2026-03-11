@@ -442,6 +442,25 @@ class SymbolTracingTestCase(unittest.TestCase):
         self.assertGreaterEqual(len(finding["investigation_leads"]), 1)
         self.assertEqual("parameter_or_unknown", finding["investigation_leads"][0]["kind"])
 
+    def test_nested_function_sink_uses_innermost_scope(self) -> None:
+        self.write_file(
+            "main.lua",
+            "local function outer()\n"
+            "  local function inner(name)\n"
+            "    return string.find(name, 'a')\n"
+            "  end\n"
+            "  return inner\n"
+            "end\n",
+        )
+
+        refresh = self.run_wrapper("refresh")
+        self.assertEqual(1, refresh["prepare"]["shards_total"])
+        self.assertEqual(0, refresh["prepare"]["trace_summary"]["trace_errors"])
+        finding = self.load_analysis_findings()[0]
+        self.assertEqual("uncertain", finding["trace_status"])
+        self.assertFalse(finding.get("trace_error"))
+        self.assertTrue(finding["human_review_visible"])
+
     def test_parameter_trace_auto_silences_only_when_caller_chain_is_safe(self) -> None:
         self.write_file(
             "main.lua",

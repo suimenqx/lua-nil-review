@@ -51,6 +51,7 @@ def default_prepare_progress() -> dict[str, Any]:
         "trace_candidates_done": 0,
         "visible_after_trace": 0,
         "auto_silenced": 0,
+        "trace_errors": 0,
         "agentic_retraced": 0,
         "agentic_improved": 0,
         "agentic_promoted_safe": 0,

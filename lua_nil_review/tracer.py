@@ -97,7 +97,7 @@ class TraceEngine:
         facts = self.repository.file_facts(file)
         if facts is None:
             raise RuntimeError(f"Missing symbol facts for {file}.")
-        function_symbol = next((item for item in facts.functions if item.start_line <= finding["line"] <= item.end_line), None)
+        function_symbol = _innermost_function_for_line(facts.functions, finding["line"])
         if function_symbol is None:
             raise RuntimeError(f"Unable to locate function scope for {file}:{finding['line']}.")
         scope = self._function_scope(file, function_symbol)
@@ -109,7 +109,19 @@ class TraceEngine:
             finding.get("call_text"),
         )
         if sink_call is None or not sink_call.args:
-            raise RuntimeError(f"Unable to locate sink call for finding {finding['finding_id']}.")
+            details = {
+                "file": file,
+                "line": finding["line"],
+                "column": finding.get("column"),
+                "call_text": finding.get("call_text"),
+                "function_id": function_symbol.function_id,
+                "function_range": f"{function_symbol.start_line}-{function_symbol.end_line}",
+            }
+            raise RuntimeError(
+                f"Unable to locate sink call for finding {finding['finding_id']} in "
+                f"{details['file']}:{details['line']} within function {details['function_id']} "
+                f"[{details['function_range']}] call_text={details['call_text']!r} column={details['column']!r}."
+            )
 
         root_expr = sink_call.args[0]
         root_text = normalize_whitespace(scope.source.node_text(root_expr))
@@ -137,7 +149,7 @@ class TraceEngine:
         facts = self.repository.file_facts(file)
         if facts is None:
             raise RuntimeError(f"Missing symbol facts for {file}.")
-        function_symbol = next((item for item in facts.functions if item.start_line <= line <= item.end_line), None)
+        function_symbol = _innermost_function_for_line(facts.functions, line)
         if function_symbol is None:
             raise RuntimeError(f"Unable to locate function scope for {file}:{line}.")
         scope = self._function_scope(file, function_symbol)
@@ -1022,6 +1034,14 @@ def _find_latest_assignment(function_node: Any, name: str, before_line: int, sou
 
 def _call_text(source: SourceIndex, call: Any) -> str:
     return f"{source.node_text(call.func)}({', '.join(source.node_text(arg) for arg in getattr(call, 'args', []))})"
+
+
+def _innermost_function_for_line(functions: list[FunctionSymbol], line: int) -> FunctionSymbol | None:
+    matches = [item for item in functions if item.start_line <= line <= item.end_line]
+    if not matches:
+        return None
+    matches.sort(key=lambda item: (item.end_line - item.start_line, -item.start_line, item.end_line, item.function_id))
+    return matches[0]
 
 
 def _function_contract_hint(function: FunctionSymbol) -> dict[str, Any] | None:

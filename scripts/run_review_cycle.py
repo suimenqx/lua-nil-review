@@ -63,6 +63,7 @@ def _format_progress_line(status: dict[str, object]) -> str:
             trace_total = int(prepare.get("trace_candidates_total") or 0)
             visible = int(prepare.get("visible_after_trace") or 0)
             shards_built = int(prepare.get("shards_built") or 0)
+            trace_errors = int(prepare.get("trace_errors") or 0)
             current_file = prepare.get("current_file")
             current_line = prepare.get("current_line")
             current = f" current={current_file}:{current_line}" if current_file and current_line else ""
@@ -82,7 +83,7 @@ def _format_progress_line(status: dict[str, object]) -> str:
             return (
                 f"[lua-nil-review] stage={stage} phase={phase} "
                 f"findings={findings_done}/{findings_total} traces={trace_done}/{trace_total} "
-                f"visible={visible} shards={shards_built}{live}{current}{summary_suffix}"
+                f"visible={visible} shards={shards_built} trace_errors={trace_errors}{live}{current}{summary_suffix}"
             )
     if stage == "sharded":
         overview = status.get("candidate_overview")
